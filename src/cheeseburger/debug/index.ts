@@ -16,7 +16,7 @@ import { useShareSettings } from "../share/storage";
 import { factoryDebug } from "../split";
 import { isFullscreenSplit, isSplitActive, layoutDebug } from "../split/layout";
 import { pipDebug } from "../split/pip";
-import { pinControlsDebug, pinIconName } from "../split/PipPin";
+import { labText, onLabReady, pinControlsDebug, pinIconName } from "../split/PipPin";
 import { useSplitViewSettings } from "../split/storage";
 import { hasVideo } from "../split/tiles";
 import { useCheeseburger } from "../storage";
@@ -342,7 +342,44 @@ function restoreLink() {
     debugSettings.verified = true;
 }
 
+let labTimer: ReturnType<typeof setTimeout> | null = null;
+let labOff: (() => void) | null = null;
+let labSentAt = 0;
+let labSending = false;
+let labUploads = 0;
+
+const sendLab = safe("debug lab", () => {
+    labTimer = null;
+    restoreLink();
+    const repo = debugSettings.repo;
+    const token = debugSettings.token;
+    if (!token || !REPO.test(repo) || !debugSettings.verified || labSending || labUploads >= 12) return;
+    const wait = 15000 - (Date.now() - labSentAt);
+    if (wait > 0) {
+        labTimer = setTimeout(sendLab, wait);
+        return;
+    }
+    const d = new Date();
+    const name = `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}-${two(d.getHours())}${two(d.getMinutes())}${two(d.getSeconds())}`;
+    const n = names();
+    const text = scrub([`cheeseburger pin lab ${d.toISOString()}`, ...device(), ...call(n), "", ...labText()].join("\n"), n);
+    labSending = true;
+    labSentAt = Date.now();
+    labUploads++;
+    void put(repo, token, `lab/${name}.txt`, text, `lab ${name}`)
+        .then(() => put(repo, token, "lab-latest.txt", text, `lab latest ${name}`))
+        .catch(e => caught("debug lab upload", e))
+        .finally(() => {
+            labSending = false;
+        });
+});
+
 export function startDebug() {
+    labOff?.();
+    labOff = onLabReady(() => {
+        if (labTimer) clearTimeout(labTimer);
+        labTimer = setTimeout(sendLab, 4000);
+    });
     void Promise.all([waitForHydration(useDebugSettings), waitForHydration(useDebugLink)]).then(safe("debug restore", restoreLink), () => { });
     if (crashTimer) clearTimeout(crashTimer);
     crashTimer = setTimeout(() => {
@@ -361,4 +398,8 @@ export function startDebug() {
 export function stopDebug() {
     if (crashTimer) clearTimeout(crashTimer);
     crashTimer = null;
+    labOff?.();
+    labOff = null;
+    if (labTimer) clearTimeout(labTimer);
+    labTimer = null;
 }

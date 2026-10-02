@@ -7,7 +7,7 @@ import { Animated as RNAnimated, Image, Pressable, StyleSheet, View } from "reac
 import { caught, safe } from "../crash";
 import { accentColor } from "../style/colors";
 import { isPipRender, mineParticipant, onPinChange, participantForPin, pinnedPip, pinPip } from "./pip";
-import { useSplitViewSettings } from "./storage";
+import { splitViewSettings, useSplitViewSettings } from "./storage";
 import { chromeShown, noteControls, noteSafeArea, onChrome, safeAreaNote } from "./tiles";
 
 const ICONS = ["PinIcon", "PictureInPictureIcon", "PipIcon", "ic_pip"];
@@ -16,19 +16,22 @@ const CONFIG = "__cheeseburgerPinConfig";
 const MARKER = "cheeseburger-pin-marker";
 const INLINE = "cheeseburger-inline-pin";
 const FOCUS = /^(?:un)?focus\s/i;
+const STOP = /^stop watching$/i;
+const OURS = /^pop out pip/i;
 const MOTION = /^(?:opacity|transform)$/;
 const LAYOUTISH = /^(?:width|height|top|left|right|bottom|x|y|position|flex|aspectRatio|margin|padding|min|max)/i;
 const FILL = { position: "absolute", left: 0, top: 0, right: 0, bottom: 0 } as const;
 const HIDDEN = { ...FILL, opacity: 0 } as const;
+const FLIP = { transform: [{ scaleY: -1 }] } as const;
 const RELATIVE = { position: "relative", top: undefined, left: undefined, right: undefined, bottom: undefined, margin: 0, marginTop: 0, marginLeft: 0, marginRight: 0, marginBottom: 0, marginHorizontal: 0, marginVertical: 0 } as const;
 
 interface Level { name: string; handles: any[]; motion: any; entering?: any; exiting?: any; pointerEvents?: string; moving: string; }
 interface Box { x: number; y: number; width: number; height: number; }
 interface Template { type: any; props: any; }
-interface MarkerRec { inner?: Template | null; size?: { width: number; height: number; }; button: any; node: any; fiber: any; chain: any[]; outer: number; template: Template | null; rect?: Box & { at: number; }; sig: string; }
+interface MarkerRec { size?: { width: number; height: number; }; button: any; node: any; fiber: any; chain: any[]; outer: number; template: Template | null; rect?: Box & { at: number; }; sig: string; }
 interface Inset { right: number; bottom: number; from: string; }
-interface PinConfig { label: string; onPress: () => void; source: number; tint?: string; }
-interface InlineRec { pid: string | null; mine: boolean; placed: boolean; why: string; }
+interface PinConfig { label: string; onPress: () => void; source: number; tint?: string; keep?: boolean; unflip?: boolean; flipGlyph?: boolean; }
+interface InlineRec { pid: string | null; mine: boolean; why: string; }
 
 const iconWrappers = new WeakMap<object, any>();
 const markers = new Set<MarkerRec>();
@@ -38,11 +41,13 @@ const insets = new Map<string, Inset>();
 const seenButtons: string[] = [];
 const seenSizes: string[] = [];
 const inlines = new Map<string, InlineRec>();
+const unflipNotes: string[] = [];
 let latest: MarkerRec | null = null;
 let active = false;
 let icon: number | null | undefined;
 let iconRetryAt = 0;
-let reanimated: any;
+let reanimatedMod: any;
+let reanimatedView: any;
 let injected = 0;
 let markersEver = 0;
 let fibersFound = 0;
@@ -51,11 +56,10 @@ let hosts = 0;
 let cloneRenders = 0;
 let fallbackRenders = 0;
 let cloneErrors = 0;
-let matchedByTree = 0;
-let matchedByBox = 0;
 let inlineMounts = 0;
 let inlineRenders = 0;
-const inlineNotes: string[] = [];
+let fromRender = 0;
+let fromMarker = 0;
 let lastSeen: string[] = [];
 export let pinIconName = "";
 
@@ -72,16 +76,27 @@ function notifyNow() {
     noteControls(markers.size > 0);
 }
 
-function animatedView(): any {
-    if (reanimated !== undefined) return reanimated;
-    reanimated = null;
+function reanimatedModule(): any {
+    if (reanimatedMod !== undefined) return reanimatedMod;
+    reanimatedMod = null;
     try {
-        const m = findByProps("useAnimatedStyle", "withTiming");
-        reanimated = m?.default?.View ?? m?.View ?? (typeof m?.createAnimatedComponent === "function" ? m.createAnimatedComponent(View) : null);
+        reanimatedMod = findByProps("useAnimatedStyle", "withTiming") ?? null;
+    } catch (e) {
+        caught("pip pin reanimated", e);
+    }
+    return reanimatedMod;
+}
+
+function animatedView(): any {
+    if (reanimatedView !== undefined) return reanimatedView;
+    reanimatedView = null;
+    const m = reanimatedModule();
+    try {
+        reanimatedView = m?.default?.View ?? m?.View ?? (typeof m?.createAnimatedComponent === "function" ? m.createAnimatedComponent(View) : null);
     } catch (e) {
         caught("pip pin animated", e);
     }
-    return reanimated;
+    return reanimatedView;
 }
 
 function pinIcon(): number | null {
@@ -113,6 +128,38 @@ class Guard extends React.Component<{ children?: any; fallback?: any; }, { faile
 
     render() {
         return this.state.failed ? this.props.fallback ?? null : this.props.children;
+    }
+}
+
+const G = globalThis as any;
+const shells: Set<() => void> = G.__cheeseburgerPinShells ??= new Set();
+
+class Shell extends React.Component<{ part: string; props: any; }, { failed: boolean; n: number; }> {
+    state = { failed: false, n: 0 };
+
+    bump = () => this.setState(s => ({ failed: false, n: s.n + 1 }));
+
+    static getDerivedStateFromError() {
+        return { failed: true };
+    }
+
+    componentDidMount() {
+        shells.add(this.bump);
+    }
+
+    componentWillUnmount() {
+        shells.delete(this.bump);
+    }
+
+    componentDidCatch(e: any) {
+        cloneErrors++;
+        caught("pip pin shell", e);
+    }
+
+    render() {
+        if (this.state.failed) return null;
+        const Impl = G.__cheeseburgerPinImpl?.[this.props.part];
+        return Impl ? React.createElement(Impl, this.props.props) : null;
     }
 }
 
@@ -185,7 +232,56 @@ function fiberOf(inst: any): any {
 }
 
 const same = (a: any, b: any) => a === b || !!a && !!b && a.alternate === b;
-const focusLabel = (props: any) => typeof props?.accessibilityLabel === "string" && FOCUS.test(props.accessibilityLabel);
+const labelOf = (props: any): string => (props && typeof props === "object" && typeof props.accessibilityLabel === "string" ? props.accessibilityLabel : "");
+const focusLabel = (props: any) => FOCUS.test(labelOf(props));
+const theirMax = (f: any) => !f.memoizedProps?.[MARK] && focusLabel(f.memoizedProps);
+const ourPin = (f: any) => OURS.test(labelOf(f.memoizedProps));
+const stopButton = (f: any) => STOP.test(labelOf(f.memoizedProps));
+
+function walkFibers(root: any, visit: (f: any, depth: number) => "stop" | "skip" | void, limit = 600) {
+    const stack: [any, number][] = [];
+    if (root?.child) stack.push([root.child, 1]);
+    let n = 0;
+    while (stack.length && n++ < limit) {
+        const [f, d] = stack.pop()!;
+        if (f.sibling) stack.push([f.sibling, d]);
+        const r = visit(f, d);
+        if (r === "stop") return;
+        if (r !== "skip" && f.child) stack.push([f.child, d + 1]);
+    }
+}
+
+function findIn(root: any, pred: (f: any) => boolean, limit = 900): any {
+    let hit: any = null;
+    for (const start of [root, root?.alternate]) {
+        if (!start) continue;
+        walkFibers(start, f => {
+            if (!pred(f)) return;
+            hit = f;
+            return "stop";
+        }, limit);
+        if (hit) return hit;
+    }
+    return null;
+}
+
+function hostOf(f: any): any {
+    const sn = f?.stateNode;
+    for (const c of [sn?.canonical?.publicInstance, sn?.canonical, sn]) if (c && typeof c.measureInWindow === "function") return c;
+    return null;
+}
+
+function firstHost(f: any): any {
+    if (!f) return null;
+    if (typeof f.type === "string" && hostOf(f)) return f;
+    let hit: any = null;
+    walkFibers(f, x => {
+        if (typeof x.type !== "string" || !hostOf(x)) return;
+        hit = x;
+        return "stop";
+    }, 200);
+    return hit;
+}
 
 function withoutMarker(props: any): any {
     const ch = props?.children;
@@ -217,18 +313,8 @@ function inspect(rec: MarkerRec) {
     } else if (rec.button) {
         rec.template = { type: rec.button.type, props: withoutMarker(rec.button.props) };
     } else rec.template = null;
-    rec.inner = null;
-    for (let i = outer - 1; i >= 0; i--) {
-        const props = chain[i].memoizedProps;
-        if (focusLabel(props) && props.layout === undefined && (props.variant !== undefined || props.size !== undefined)) {
-            rec.inner = { type: chain[i].elementType ?? chain[i].type, props: withoutMarker(props) };
-            break;
-        }
-    }
     const levels = chain.slice(outer + 1, outer + 13).map(f => levelOf(f.elementType ?? f.type, f.memoizedProps));
-    const shape = (v: any) => v === null ? "null" : Array.isArray(v) ? `array${v.length}` : typeof v === "object" ? `{${Object.keys(v).slice(0, 6).join(",")}}` : typeof v;
     lastSeen = [
-        `maximize props: ${Object.entries(rec.template?.props ?? {}).filter(([k]) => k !== "children").slice(0, 10).map(([k, v]) => `${k}=${shape(v)}`).join(" ")}${rec.inner ? `, inner ${nameOf(rec.inner.type) || "anonymous"}` : ", no inner"}`,
         `maximize button (last seen ${new Date().toISOString().slice(11, 19)}): ${nameOf(rec.template?.type) || "anonymous"} depth ${outer}, keys=${Object.keys(rec.template?.props ?? {}).slice(0, 14).join(",")}`,
         `maximize parents: ${levels.map((l, i) => `${i}:${l.name}${l.moving ? ` moves ${l.moving}` : ""}${l.handles.length ? ` handles ${l.handles.length}` : ""}${l.motion ? " rn-animated" : ""}${l.entering ? " entering" : ""}${l.exiting ? " exiting" : ""}${l.pointerEvents ? ` pe=${l.pointerEvents}` : ""}`).join(" < ") || "none"}`,
     ];
@@ -260,10 +346,11 @@ function Marker({ button }: { button: any; }) {
             }
             rec.fiber = fiber;
             const before = rec.sig;
+            const props = rec.template?.props;
             inspect(rec);
             latest = rec;
             patchControls(rec.chain);
-            if (fresh || before !== rec.sig) notifyNow();
+            if (fresh || before !== rec.sig || props !== rec.template?.props) notifyNow();
         } catch (e) {
             caught("pip pin marker", e);
         }
@@ -303,67 +390,6 @@ function measureNode(node: any, done: (b: Box) => void) {
     }
 }
 
-const G = globalThis as any;
-const shells: Set<() => void> = G.__cheeseburgerPinShells ??= new Set();
-
-class Shell extends React.Component<{ part: string; props: any; }, { failed: boolean; n: number; }> {
-    state = { failed: false, n: 0 };
-
-    bump = () => this.setState(s => ({ failed: false, n: s.n + 1 }));
-
-    static getDerivedStateFromError() {
-        return { failed: true };
-    }
-
-    componentDidMount() {
-        shells.add(this.bump);
-    }
-
-    componentWillUnmount() {
-        shells.delete(this.bump);
-    }
-
-    componentDidCatch(e: any) {
-        cloneErrors++;
-        caught("pip pin shell", e);
-    }
-
-    render() {
-        if (this.state.failed) return null;
-        const Impl = G.__cheeseburgerPinImpl?.[this.props.part];
-        return Impl ? React.createElement(Impl, this.props.props) : null;
-    }
-}
-
-export function startPins() {
-    active = true;
-    hookControlsEarly(0);
-    G.__cheeseburgerPinImpl = { TilePin: Pin, InlinePin, Marker };
-    for (const bump of [...shells]) {
-        try {
-            bump();
-        } catch { }
-    }
-}
-
-export function stopPins() {
-    active = false;
-    if (controlsTimer) clearTimeout(controlsTimer);
-    controlsTimer = null;
-    for (const u of fcUnpatches.splice(0)) {
-        try {
-            u();
-        } catch { }
-    }
-    fcType = null;
-    fcTypes.clear();
-    hookCount = 0;
-    owners.clear();
-    markers.clear();
-    latest = null;
-    notifyNow();
-}
-
 function glyph(el: any, config: PinConfig): any {
     const props = el.props ?? {};
     const f: any = typeof props.style === "function" ? {} : StyleSheet.flatten(props.style) ?? {};
@@ -371,7 +397,12 @@ function glyph(el: any, config: PinConfig): any {
     return React.createElement(Image, {
         key: el.key ?? undefined,
         source: config.source,
-        style: [{ width: props.width ?? f.width ?? size, height: props.height ?? f.height ?? size }, typeof props.style === "function" ? undefined : props.style, { tintColor: config.tint ?? f.tintColor ?? props.color ?? f.color ?? "#ffffff" }],
+        style: [
+            { width: props.width ?? f.width ?? size, height: props.height ?? f.height ?? size },
+            typeof props.style === "function" ? undefined : props.style,
+            { tintColor: config.tint ?? f.tintColor ?? props.color ?? f.color ?? "#ffffff" },
+            config.flipGlyph ? FLIP : undefined,
+        ],
         accessible: false,
     });
 }
@@ -379,6 +410,70 @@ function glyph(el: any, config: PinConfig): any {
 function PinGlyph(props: any): any {
     const source = pinIcon();
     return source == null ? null : glyph({ props }, { source, label: "", onPress() { } });
+}
+
+const glyphTypes = new Map<string, any>();
+const glyphSet = new WeakSet<object>([PinGlyph]);
+
+function glyphType(config: PinConfig): any {
+    const key = `${config.flipGlyph ? 1 : 0}|${config.tint ?? ""}`;
+    let T = glyphTypes.get(key);
+    if (!T) {
+        T = (props: any) => {
+            const source = pinIcon();
+            return source == null ? null : glyph({ props }, { source, label: "", onPress() { }, tint: config.tint, flipGlyph: config.flipGlyph });
+        };
+        T.displayName = "PinGlyph";
+        glyphTypes.set(key, T);
+        glyphSet.add(T);
+    }
+    return T;
+}
+
+function noteUnflip(line: string) {
+    if (unflipNotes.includes(line)) return;
+    unflipNotes.push(line);
+    if (unflipNotes.length > 4) unflipNotes.shift();
+}
+
+function unflipButton(el: any, depth = 0): { out: any; done: boolean; } {
+    if (Array.isArray(el)) {
+        let done = false;
+        const out = el.map(child => {
+            if (done) return child;
+            const r = unflipButton(child, depth);
+            done = r.done;
+            return r.out;
+        });
+        return { out, done };
+    }
+    if (!el || typeof el !== "object" || !("$$typeof" in el) || depth > 7) return { out: el, done: false };
+    const p = el.props ?? {};
+    if (depth > 0 && labelOf(p) && typeof p.onPress === "function") {
+        noteUnflip(`wrapped ${nameOf(el.type) || "anonymous"} at depth ${depth}`);
+        return { out: React.createElement(View, { key: el.key ?? "cheeseburger-unflip", collapsable: false, pointerEvents: "box-none", style: FLIP }, el), done: true };
+    }
+    if (p.children == null || typeof p.children !== "object") return { out: el, done: false };
+    const r = unflipButton(p.children, depth + 1);
+    return r.done ? { out: { ...el, props: { ...p, children: r.out } }, done: true } : { out: el, done: false };
+}
+
+function unflipContents(el: any): any {
+    if (!el || typeof el !== "object" || Array.isArray(el) || !("$$typeof" in el)) return null;
+    const ch = el.props?.children;
+    if (ch == null || typeof ch !== "object") return null;
+    noteUnflip(`wrapped what's inside ${nameOf(el.type) || "anonymous"}`);
+    return { ...el, props: { ...el.props, children: React.createElement(View, { key: "cheeseburger-unflip", collapsable: false, pointerEvents: "box-none", style: FLIP }, ch) } };
+}
+
+function rendered(result: any, config: PinConfig): any {
+    if (!config.unflip) return walkButton(result, config, false);
+    const r = unflipButton(result);
+    if (r.done) return walkButton(r.out, { ...config, unflip: false }, false);
+    const inside = unflipContents(result);
+    if (inside) return walkButton(inside, { ...config, unflip: false }, false);
+    noteUnflip(`nothing to wrap in ${nameOf(result?.type) || typeof result}, flipped the icon instead`);
+    return walkButton(result, { ...config, unflip: false, flipGlyph: true }, false);
 }
 
 function iconType(type: any): any {
@@ -392,14 +487,14 @@ function iconType(type: any): any {
         const clean = { ...props };
         delete clean[CONFIG];
         const result = original.call(self, clean, ref);
-        return config ? walkButton(result, config, false) : result;
+        return config ? rendered(result, config) : result;
     };
     let wrapper: any;
     if (typeof type === "function" && type.prototype?.isReactComponent) {
         wrapper = class extends type {
             render() {
                 const result = super.render();
-                return this.props[CONFIG] ? walkButton(result, this.props[CONFIG], false) : result;
+                return this.props[CONFIG] ? rendered(result, this.props[CONFIG]) : result;
             }
         };
     } else if (typeof type === "function") wrapper = function (this: any, props: any) { return run(type, this, props); };
@@ -425,6 +520,7 @@ function walkButton(el: any, config: PinConfig, top = true): any {
     const props = el.props ?? {};
     const name = nameOf(el.type);
     const next: any = { ...props };
+    const nested = top && config.unflip ? { ...config, unflip: false } : config;
     const pressable = typeof props.onPress === "function";
     if (pressable) {
         next.onPress = config.onPress;
@@ -432,34 +528,62 @@ function walkButton(el: any, config: PinConfig, top = true): any {
         next.accessibilityLabel = config.label;
         next.accessibilityHint = undefined;
         next.onLayout = undefined;
-        next.style = relative(props.style);
+        if (!config.keep) next.style = relative(props.style);
         next.ref = null;
         next[MARK] = true;
     } else if (top) {
-        next.style = relative(props.style);
+        if (!config.keep) next.style = relative(props.style);
         next.ref = null;
         next[MARK] = true;
     }
-    if (el.type === PinGlyph) return el;
-    if (/Text/i.test(name) && typeof props.children === "string" && props.children.trim().length <= 3) return glyph(el, config);
-    if (/Icon$|Svg(?:View)?$/i.test(name) || props.viewBox != null || el.type === Image || /Image(?:View)?$/i.test(name) && props.source != null || typeof props.source === "number") return glyph(el, config);
+    if (labelOf(props) && !pressable) next.accessibilityLabel = config.label;
+    if (glyphSet.has(el.type)) return el;
+    if (/Text/i.test(name) && typeof props.children === "string" && props.children.trim().length <= 3) return glyph(el, nested);
+    if (/Icon$|Svg(?:View)?$/i.test(name) || props.viewBox != null || el.type === Image || /Image(?:View)?$/i.test(name) && props.source != null || typeof props.source === "number") return glyph(el, nested);
     for (const key of ["icon", "Icon", "IconComponent", "iconComponent", "leadingIcon", "trailingIcon", "leftIcon", "rightIcon"]) {
         const value = props[key];
         if (value == null) continue;
-        if (typeof value === "object" && value.props) next[key] = glyph(value, config);
-        else if (typeof value === "function" || value && typeof value === "object" && value.$$typeof) next[key] = PinGlyph;
+        if (typeof value === "object" && value.props) next[key] = glyph(value, nested);
+        else if (typeof value === "function" || value && typeof value === "object" && value.$$typeof) next[key] = glyphType(nested);
         else if (typeof value === "number") next[key] = config.source;
         else if (typeof value === "string") next[key] = pinIconName;
         else next[key] = undefined;
     }
-    if (typeof props.renderIcon === "function") next.renderIcon = safe("pip pin icon", (...args: any[]) => walkButton(props.renderIcon(...args), config, false));
+    if (typeof props.renderIcon === "function") next.renderIcon = safe("pip pin icon", (...args: any[]) => walkButton(props.renderIcon(...args), nested, false));
     if (typeof props.children === "function") {
         const children = props.children;
-        next.children = safe("pip pin children", (...args: any[]) => walkButton(children(...args), config, false));
-    } else if (props.children != null) next.children = walkButton(props.children, config, false);
+        next.children = safe("pip pin children", (...args: any[]) => walkButton(children(...args), nested, false));
+    } else if (props.children != null) next.children = walkButton(props.children, nested, false);
     const type = iconType(el.type);
-    if (type !== el.type || iconWrappers.has(type)) next[CONFIG] = config;
+    const wrapped = type !== el.type || iconWrappers.has(type);
+    if (wrapped) next[CONFIG] = top ? config : nested;
+    else if (top && config.unflip && next.children != null && typeof next.children !== "function") {
+        const r = unflipButton(next.children, 1);
+        next.children = r.done ? r.out : React.createElement(View, { key: "cheeseburger-unflip", collapsable: false, pointerEvents: "box-none", style: FLIP }, next.children);
+        noteUnflip(r.done ? "wrapped the inner button" : "wrapped the button contents");
+    }
     return { ...el, key: top ? "cheeseburger-pin-button" : el.key, type, props: next, ...(pressable || top ? { ref: null } : {}) };
+}
+
+function pinConfig(pid: string, source: number): PinConfig {
+    const here = pinnedPip() === pid;
+    return {
+        label: here ? "pop out pip, pinned" : "pop out pip",
+        onPress: safe("pip pin press", () => pinPip(here ? null : pid)),
+        source,
+        tint: here ? accentColor("#ff0048") : undefined,
+    };
+}
+
+function cloneOf(template: Template, config: PinConfig): any {
+    try {
+        const el = React.createElement(template.type, { ...template.props, accessibilityLabel: config.label, [MARK]: true });
+        return walkButton(el, config);
+    } catch (e) {
+        cloneErrors++;
+        caught("pip pin clone", e);
+        return null;
+    }
 }
 
 function Fallback({ config }: { config: PinConfig; }) {
@@ -483,12 +607,12 @@ function Fallback({ config }: { config: PinConfig; }) {
     </RNAnimated.View>;
 }
 
-function Levels({ levels, children }: { levels: Level[]; children: any; }) {
+function Levels({ levels, fill, children }: { levels: Level[]; fill?: boolean; children: any; }) {
     const A = animatedView();
     let node = children;
     levels.forEach((l, i) => {
-        if (l.motion) node = <RNAnimated.View key={`m${i}`} pointerEvents="box-none" style={l.motion}>{node}</RNAnimated.View>;
-        if (A && (l.handles.length || l.entering != null || l.exiting != null)) node = <A key={`r${i}`} pointerEvents="box-none" style={l.handles} entering={l.entering} exiting={l.exiting}>{node}</A>;
+        if (l.motion) node = <RNAnimated.View key={`m${i}`} pointerEvents="box-none" style={fill ? [FILL, l.motion] : l.motion}>{node}</RNAnimated.View>;
+        if (A && (l.handles.length || l.entering != null || l.exiting != null)) node = <A key={`r${i}`} pointerEvents="box-none" style={fill ? [FILL, ...l.handles] : l.handles} entering={l.entering} exiting={l.exiting}>{node}</A>;
     });
     return node;
 }
@@ -531,7 +655,7 @@ function noteSize(line: string) {
     if (seenSizes.length > 4) seenSizes.shift();
 }
 
-interface Match { rec: MarkerRec; levels: Level[]; by: string; }
+interface Match { rec: MarkerRec; levels: Level[]; }
 
 function matchFor(pinFiber: any, tile: Box | null): Match | null {
     const mine: any[] = [];
@@ -548,13 +672,10 @@ function matchFor(pinFiber: any, tile: Box | null): Match | null {
             }
         }
     }
-    if (best) {
-        const levels = best.rec.chain.slice(best.rec.outer + 1, best.j).map(f => levelOf(f.elementType ?? f.type, f.memoizedProps));
-        return { rec: best.rec, levels, by: "tree" };
-    }
+    if (best) return { rec: best.rec, levels: best.rec.chain.slice(best.rec.outer + 1, best.j).map(f => levelOf(f.elementType ?? f.type, f.memoizedProps)) };
     if (!tile) return null;
     const hit = [...markers].filter(m => m.rect && Date.now() - m.rect.at < 3000 && contains(tile, m.rect)).sort((a, b) => b.rect!.at - a.rect!.at)[0];
-    return hit ? { rec: hit, levels: [], by: "box" } : null;
+    return hit ? { rec: hit, levels: [] } : null;
 }
 
 let insetsSource: { context: any; hook: any; } | null | undefined;
@@ -631,16 +752,12 @@ function Pin({ coords, pid, stream }: { coords: any; pid: string; stream: boolea
 
     const onLayout = safe("pip pin layout", (e: any) => {
         const layout = e?.nativeEvent?.layout;
-        if (!layout) return;
-        check(layout);
+        if (layout) check(layout);
     });
 
-    const visible = active && on && valid && owners.get(pid) === owner;
+    const fallbackOnly = !fcType;
+    const visible = fallbackOnly && active && on && valid && owners.get(pid) === owner;
     const match = visible ? matchFor(pinFiber.current, tileBox.current) : null;
-    if (match) {
-        if (match.by === "tree") matchedByTree++;
-        else matchedByBox++;
-    }
 
     React.useEffect(() => {
         if (!visible) return;
@@ -667,20 +784,17 @@ function Pin({ coords, pid, stream }: { coords: any; pid: string; stream: boolea
 
     let content: any = null;
     const source = visible ? pinIcon() : null;
-    const inline = inlines.get(pid);
-    if (visible && source != null && !fcType && !inline) {
+    if (visible && source != null && !inlines.get(pid)) {
         const config = pinConfig(pid, source);
         const inset = insets.get(kind) ?? insets.get(stream ? "camera" : "stream") ?? { right: 8, bottom: 8, from: "default" };
         const fallback = <Fallback config={config} />;
         const rec = match?.rec ?? (markers.size ? null : undefined);
         let inner: any = null;
         if (rec?.template) {
-            const blocked = match!.levels.some(l => l.pointerEvents === "none" || l.pointerEvents === "box-only");
-            let clone: any = null;
-            clone = cloneOf(rec.template, config);
+            const clone = cloneOf(rec.template, config);
             if (clone) {
                 cloneRenders++;
-                inner = <View pointerEvents={blocked ? "none" : "box-none"}><Levels levels={match!.levels}><Guard fallback={fallback}>{clone}</Guard></Levels></View>;
+                inner = <Levels levels={match!.levels}><Guard fallback={fallback}>{clone}</Guard></Levels>;
             } else inner = fallback;
         } else if (rec === undefined && !markersEver) {
             fallbackRenders++;
@@ -696,49 +810,17 @@ function Pin({ coords, pid, stream }: { coords: any; pid: string; stream: boolea
     </View>;
 }
 
-function pinConfig(pid: string, source: number): PinConfig {
-    const here = pinnedPip() === pid;
-    return {
-        label: here ? "pop out pip, pinned" : "pop out pip",
-        onPress: safe("pip pin press", () => pinPip(here ? null : pid)),
-        source,
-        tint: here ? accentColor("#ff0048") : undefined,
-    };
-}
-
-function cloneOf(template: Template, config: PinConfig): any {
-    try {
-        const el = React.createElement(template.type, { ...template.props, accessibilityLabel: config.label, [MARK]: true });
-        return walkButton(el, config);
-    } catch (e) {
-        cloneErrors++;
-        caught("pip pin clone", e);
-        return null;
-    }
-}
-
-function noteInline(line: string) {
-    if (inlineNotes.includes(line)) return;
-    inlineNotes.push(line);
-    if (inlineNotes.length > 8) inlineNotes.shift();
-}
-
 function findDown(root: any, limit: number): any {
-    const stack = [root?.child];
-    let seen = 0;
-    while (stack.length && seen < limit) {
-        const f = stack.pop();
-        if (!f) continue;
-        seen++;
+    let found: any = null;
+    walkFibers(root, f => {
         const props = f.memoizedProps;
-        if (props && typeof props === "object" && props.sharedCoords != null) {
-            const part = participantForPin(props);
-            if (part) return part;
-        }
-        if (f.sibling) stack.push(f.sibling);
-        if (f.child) stack.push(f.child);
-    }
-    return null;
+        if (!props || typeof props !== "object" || props.sharedCoords == null) return;
+        const part = participantForPin(props);
+        if (!part) return;
+        found = part;
+        return "stop";
+    }, limit);
+    return found;
 }
 
 function participantNear(fiber: any): any {
@@ -759,16 +841,265 @@ function participantNear(fiber: any): any {
 
 const isControls = (f: any) => !!f && (fcTypes.has(f.elementType) || fcTypes.has(f.type) || fcTypes.has(f.elementType?.type) || fcTypes.has(f.type?.type) || fcTypes.size > 0 && /FloatingControls/.test(nameOf(f.elementType ?? f.type)));
 
-function InlinePin({ owner }: { owner: any; }) {
+function controlsAbove(fiber: any): any {
+    for (let f = fiber?.return, i = 0; f && i < 12; f = f.return, i++) if (isControls(f)) return f;
+    return null;
+}
+
+const short = (v: any): string => v == null ? String(v) : typeof v === "number" ? String(Math.round(v * 100) / 100) : typeof v === "string" ? v.slice(0, 24) : typeof v === "boolean" ? String(v) : typeof v === "function" ? `fn ${nameOf(v)}`.trim() : Array.isArray(v) ? `[${v.length}]` : `{${Object.keys(v).slice(0, 5).join(",")}}`;
+
+const animNames = new WeakMap<object, string>();
+
+function animName(v: any): string {
+    if (v == null || typeof v !== "object" && typeof v !== "function") return short(v);
+    const cached = animNames.get(v);
+    if (cached !== undefined) return cached;
+    let name = "";
+    const R = reanimatedModule();
+    if (R) {
+        for (const k of Object.keys(R)) {
+            let e: any;
+            try {
+                e = R[k];
+            } catch {
+                continue;
+            }
+            if (e && (e === v || typeof v === "object" && e === v.constructor)) {
+                name = k;
+                break;
+            }
+        }
+    }
+    if (!name) name = nameOf(typeof v === "object" ? v.constructor : v) || (typeof v === "function" ? "fn" : "object");
+    let fields = "";
+    try {
+        if (typeof v === "object") fields = Object.keys(v).filter(k => /V$|^(?:duration|delay|damping|stiffness|mass|easing|definitions|value|randomize)/i.test(k)).slice(0, 8).map(k => `${k}=${short(v[k])}`).join(" ");
+        if (typeof v === "object" && "value" in v && !fields.includes("value=")) fields += ` value=${short(v.value)}`;
+    } catch { }
+    const out = fields.trim() ? `${name}(${fields.trim()})` : name;
+    animNames.set(v, out);
+    return out;
+}
+
+function handleText(s: any): string {
+    const init = s?.initial?.value;
+    if (!init || typeof init !== "object") return "anim{}";
+    return `anim{${Object.entries(init).slice(0, 8).map(([k, v]) => k === "transform" && Array.isArray(v) ? `transform=${v.map((t: any) => Object.entries(t ?? {}).map(([a, b]) => `${a}:${short(b)}`).join("")).join(",")}` : `${k}=${short(v)}`).join(" ")}}`;
+}
+
+function styleText(style: any): string {
+    if (style == null) return "";
+    if (typeof style === "function") return "style=fn";
+    const anims: string[] = [];
+    const rn: string[] = [];
+    const walk = (s: any) => {
+        if (!s || typeof s !== "object") return;
+        if (Array.isArray(s)) return s.forEach(walk);
+        if (s.viewDescriptors && s.initial) {
+            anims.push(handleText(s));
+            return;
+        }
+        for (const [k, v] of Object.entries(s)) if (isNode(v) || k === "transform" && Array.isArray(v) && v.some((t: any) => t && Object.values(t).some(isNode))) rn.push(k);
+    };
+    try {
+        walk(style);
+    } catch { }
+    const f = flat(style);
+    const keep: string[] = [];
+    for (const key of ["position", "top", "right", "bottom", "left", "width", "height", "opacity", "zIndex", "overflow", "padding", "margin", "alignItems", "justifyContent", "flexDirection"]) {
+        if (f[key] !== undefined && typeof f[key] !== "object") keep.push(`${key}:${short(f[key])}`);
+    }
+    if (Array.isArray(f.transform) && f.transform.length) keep.push(`transform:${f.transform.map((t: any) => Object.entries(t ?? {}).map(([a, b]) => `${a}=${short(b)}`).join("")).join(",")}`);
+    return [keep.length ? `{${keep.join(" ")}}` : "", ...anims, rn.length ? `rnanim(${rn.join(",")})` : ""].filter(Boolean).join(" ");
+}
+
+function propsText(props: any): string {
+    if (!props || typeof props !== "object") return "";
+    const label = labelOf(props);
+    const st = styleText(props.style);
+    const la = ["entering", "exiting", "layout"].filter(k => props[k] != null).map(k => `${k}=${animName(props[k])}`).join(" ");
+    const pe = typeof props.pointerEvents === "string" ? `pe=${props.pointerEvents}` : "";
+    return [label ? `"${label.slice(0, 28)}"` : "", st, la, pe, props[MARK] ? "[ours]" : ""].filter(Boolean).join(" ");
+}
+
+const INTERESTING = /Animated|Reanimated|Floating|Control|Label|Pressable|Button|Pill|Icon|Card|Overlay/i;
+
+function treeLines(root: any): string[] {
+    const out: string[] = [];
+    walkFibers(root, (f, d) => {
+        if (out.length >= 140) return "stop";
+        const props = f.memoizedProps;
+        const name = nameOf(f.elementType ?? f.type) || "anonymous";
+        const text = propsText(props);
+        if (typeof f.type === "string" || text || INTERESTING.test(name)) out.push(`${"  ".repeat(Math.min(d, 16))}${name}${text ? ` ${text}` : ""}`.slice(0, 280));
+        if (props?.[MARK]) return "skip";
+    }, 900);
+    return out;
+}
+
+function elementLines(el: any, depth: number, out: string[]) {
+    if (out.length >= 90 || depth > 9) return;
+    if (Array.isArray(el)) {
+        el.forEach(child => elementLines(child, depth, out));
+        return;
+    }
+    if (!el || typeof el !== "object" || !("$$typeof" in el)) return;
+    const p = el.props ?? {};
+    const name = el.type === React.Fragment ? "Fragment" : nameOf(el.type) || "anonymous";
+    const text = propsText(p);
+    out.push(`${"  ".repeat(depth)}${name}${el.key != null ? `#${String(el.key).slice(0, 20)}` : ""}${text ? ` ${text}` : ""} props=${Object.keys(p).filter(k => k !== "children").slice(0, 12).join(",")}`.slice(0, 300));
+    if (p[MARK] || el.key === INLINE) return;
+    if (typeof p.children === "function") out.push(`${"  ".repeat(depth + 1)}(render function)`);
+    else if (p.children != null && typeof p.children === "object") elementLines(p.children, depth + 1, out);
+}
+
+const labRuns: string[][] = [];
+let labTree: string[] = [];
+let labElements: string[] = [];
+let labElementsAt = 0;
+let labSeq = 0;
+const labListeners = new Set<() => void>();
+const labOn = () => active && splitViewSettings.pinLab !== false;
+
+export function onLabReady(l: () => void) {
+    labListeners.add(l);
+    return () => void labListeners.delete(l);
+}
+
+function emitLab() {
+    labListeners.forEach(l => {
+        try {
+            l();
+        } catch (e) {
+            caught("pip lab listener", e);
+        }
+    });
+}
+
+function nameHost(fc: any): any {
+    const iconFiber = findIn(fc, f => /LabelIcon/i.test(nameOf(f.elementType ?? f.type)));
+    if (!iconFiber) return null;
+    for (let f = iconFiber.return, i = 0; f && i < 10 && !same(f, fc); f = f.return, i++) if (/Pressable/.test(nameOf(f.elementType ?? f.type))) return hostOf(firstHost(f));
+    for (let f = iconFiber.return, i = 0; f && i < 10; f = f.return, i++) if (typeof f.type === "string" && hostOf(f)) return hostOf(f);
+    return null;
+}
+
+interface LabTarget { area: () => any; fc: () => any; kind: string; }
+
+function runLab(event: string, target: LabTarget) {
+    if (!labOn()) return;
+    const seq = ++labSeq;
+    const started = Date.now();
+    const lines: string[] = [`${event} #${seq} on a ${target.kind} tile at ${new Date().toISOString().slice(11, 19)}`];
+    let prev = "";
+    let ticks = 0;
+    let last: Record<string, Box> = {};
+    const rel = (b: Box | undefined, card: Box | undefined) => (b && card ? `${Math.round(b.x - card.x)},${Math.round(b.y - card.y)} ${Math.round(b.width)}x${Math.round(b.height)}` : "-");
+    const sample = (next: () => void) => {
+        const fc = target.fc();
+        const nodes: [string, any][] = [
+            ["card", target.area()],
+            ["max", hostOf(firstHost(findIn(fc, theirMax)))],
+            ["pin", hostOf(firstHost(findIn(fc, ourPin)))],
+            ["x", hostOf(firstHost(findIn(fc, stopButton)))],
+            ["name", nameHost(fc)],
+        ];
+        const got: Record<string, Box> = {};
+        let left = nodes.length;
+        let flushed = false;
+        const flush = () => {
+            if (flushed) return;
+            flushed = true;
+            const card = got.card;
+            const line = `card ${card ? `${Math.round(card.width)}x${Math.round(card.height)}` : "-"} | max ${rel(got.max, card)} | pin ${rel(got.pin, card)} | x ${rel(got.x, card)} | name ${rel(got.name, card)}`;
+            if (line !== prev) {
+                lines.push(`  +${Date.now() - started}ms ${line}`);
+                prev = line;
+            }
+            if (got.card) last = got;
+            next();
+        };
+        const one = () => {
+            if (--left <= 0) flush();
+        };
+        for (const [key, node] of nodes) {
+            if (!node || typeof node.measureInWindow !== "function") {
+                one();
+                continue;
+            }
+            try {
+                node.measureInWindow(safe("pip lab measure", (x: number, y: number, width: number, height: number) => {
+                    if ([x, y, width, height].every(n => typeof n === "number" && Number.isFinite(n))) got[key] = { x, y, width, height };
+                    one();
+                }));
+            } catch {
+                one();
+            }
+        }
+        setTimeout(safe("pip lab flush", flush), 60);
+    };
+    const finish = () => {
+        const card = last.card;
+        const max = last.max;
+        const pin = last.pin;
+        if (!card) lines.push("  result: card not measured");
+        else if (!pin) lines.push(`  result: pin not on screen${max ? `, maximize at ${rel(max, card)}` : ""}`);
+        else if (!max) lines.push(`  result: maximize gone, pin at ${rel(pin, card)}`);
+        else {
+            const mirroredY = card.height - (max.y - card.y + max.height);
+            const dx = Math.round(pin.x - max.x);
+            const dy = Math.round(pin.y - card.y - mirroredY);
+            const level = Math.round(pin.y - max.y);
+            lines.push(`  result: pin vs mirrored maximize dx ${dx} dy ${dy}${Math.abs(dy) > 2 && Math.abs(level) <= 2 ? " (measured before the flip)" : ""}, size ${Math.round(pin.width)}x${Math.round(pin.height)} vs ${Math.round(max.width)}x${Math.round(max.height)}${Math.abs(dx) <= 2 && (Math.abs(dy) <= 2 || Math.abs(level) <= 2) ? " ✓" : ""}`);
+        }
+        labRuns.push(lines);
+        while (labRuns.length > 6) labRuns.shift();
+        emitLab();
+    };
+    const step = safe("pip lab step", () => {
+        if (seq !== labSeq && ticks > 0) {
+            lines.push("  cut short by the next event");
+            finish();
+            return;
+        }
+        sample(() => {
+            ticks++;
+            if (ticks === 6) {
+                try {
+                    const fc = target.fc();
+                    if (fc) labTree = treeLines(fc);
+                } catch (e) {
+                    caught("pip lab tree", e);
+                }
+            }
+            if (ticks < 22 && labOn()) setTimeout(step, 70);
+            else finish();
+        });
+    });
+    step();
+}
+
+export function labText(): string[] {
+    return [
+        `pin lab: ${labSeq} events, ${fcNote}, reanimated ${reanimatedModule() ? "found" : "missing"}, flip ${unflipNotes.join("; ") || "nothing wrapped yet"}`,
+        ...labRuns.flat(),
+        "controls tree (live):",
+        ...(labTree.length ? labTree : ["  not captured yet"]),
+        "controls render output:",
+        ...(labElements.length ? labElements : ["  not captured yet"]),
+    ];
+}
+
+interface InlineProps { owner: any; button: any; path?: any[]; }
+
+function InlinePin({ owner, button, path }: InlineProps) {
     const on = useSplitViewSettings((s: any) => s.pipPins !== false);
     const [, force] = React.useReducer((n: number) => n + 1, 0);
     const ref = React.useRef<any>(null);
-    const me = React.useRef<InlineRec>({ pid: null, mine: false, placed: false, why: "starting" }).current;
+    const me = React.useRef<InlineRec>({ pid: null, mine: false, why: "starting" }).current;
     const fc = React.useRef<any>(null);
     const stream = React.useRef(false);
-    const box = React.useRef<{ width: number; height: number; } | null>(null);
-    const spotRef = React.useRef<any>(null);
-    const [inner, setInner] = React.useState(false);
+    const shown = React.useRef<boolean | null>(null);
 
     React.useLayoutEffect(() => {
         inlineMounts++;
@@ -777,12 +1108,7 @@ function InlinePin({ owner }: { owner: any; }) {
         try {
             const fiber = fiberOf(ref.current);
             if (!fiber) me.why = "no fiber";
-            for (let f = fiber?.return, i = 0; f && i < 12; f = f.return, i++) {
-                if (isControls(f)) {
-                    fc.current = f;
-                    break;
-                }
-            }
+            fc.current = controlsAbove(fiber);
             const part = participantForPin(owner ?? {}) ?? participantNear(fiber);
             if (!part || part.id == null) me.why = fiber ? "no participant" : me.why;
             else if (mineParticipant(part)) {
@@ -791,8 +1117,9 @@ function InlinePin({ owner }: { owner: any; }) {
             } else {
                 me.pid = String(part.id);
                 stream.current = part.type === 0 || me.pid.startsWith("call:");
-                me.why = "found";
+                me.why = "ready";
                 inlines.set(me.pid, me);
+                notifyNow();
             }
         } catch (e) {
             caught("pip inline pin", e);
@@ -805,84 +1132,52 @@ function InlinePin({ owner }: { owner: any; }) {
         };
     }, []);
 
-    const rec = fc.current ? [...markers].find(m => m.chain.some(f => same(f, fc.current))) ?? null : null;
-    const kind = stream.current ? "stream" : "camera";
+    const rec = !button && fc.current ? [...markers].find(m => m.chain.some(f => same(f, fc.current))) ?? null : null;
+    let template: Template | null = null;
+    let levels: Level[] = [];
+    if (button) {
+        template = { type: button.type, props: withoutMarker(button.props) };
+        levels = (path ?? []).map(el => levelOf(el.type, el.props));
+    } else if (rec?.template) {
+        template = rec.template;
+        const top = rec.chain.findIndex(f => same(f, fc.current));
+        levels = top > rec.outer ? rec.chain.slice(rec.outer + 1, top).map(f => levelOf(f.elementType ?? f.type, f.memoizedProps)) : [];
+    }
+    const present = !!template && !!me.pid && !me.mine;
 
-    const place = safe("pip inline place", (tries = 0) => {
-        if (!me.pid || !rec?.node || !ref.current || !box.current) return;
-        measureNode(ref.current, parent => measureNode(rec.node, btn => {
-            const scale = parent.width / box.current!.width;
-            const bscale = rec.size ? btn.width / rec.size.width : 1;
-            if (Math.abs(scale - 1) > 0.02 || Math.abs(bscale - 1) > 0.02) {
-                me.why = `waiting, scaled ${scale.toFixed(2)}/${bscale.toFixed(2)}`;
-                if (tries < 12) setTimeout(() => place(tries + 1), 250);
-                return;
-            }
-            const next = insetFrom(parent, btn);
-            noteInline(`${kind} area ${Math.round(parent.width)}x${Math.round(parent.height)}, maximize ${Math.round(btn.x - parent.x)},${Math.round(btn.y - parent.y)} ${Math.round(btn.width)}x${Math.round(btn.height)}, pin right ${next.right} bottom ${next.bottom} (${next.from})`);
-            me.placed = true;
-            me.why = "placed";
-            const prev = insets.get(kind);
-            if (!prev || prev.right !== next.right || prev.bottom !== next.bottom || prev.from !== next.from) {
-                insets.set(kind, next);
-                notifyNow();
-            }
-        }));
+    React.useLayoutEffect(() => {
+        if (shown.current === present) return;
+        const first = shown.current === null;
+        shown.current = present;
+        if (first && !present || me.mine) return;
+        try {
+            runLab(present ? "show" : "hide", {
+                area: () => ref.current,
+                fc: () => controlsAbove(fiberOf(ref.current)) ?? fc.current,
+                kind: stream.current ? "stream" : "camera",
+            });
+        } catch (e) {
+            caught("pip lab", e);
+        }
     });
 
-    React.useEffect(() => {
-        place();
-    }, [rec, me.pid]);
-
-    const source = active && on && me.pid && !me.mine && rec?.template ? pinIcon() : null;
-    const template = inner && rec?.inner ? rec.inner : rec?.template;
-    React.useEffect(() => {
-        if (source == null || !template) return;
-        const check = (late: boolean) => measureNode(ref.current, area => measureNode(spotRef.current, spot => {
-            noteInline(`spot ${Math.round(spot.width)}x${Math.round(spot.height)} at ${Math.round(spot.x - area.x)},${Math.round(spot.y - area.y)} in ${Math.round(area.width)}x${Math.round(area.height)} (${inner ? "inner" : "outer"}${late ? ", later" : ""})`);
-        }));
-        const a = setTimeout(safe("pip inline check", () => {
-            check(false);
-            if (!spotRef.current) return;
-            let measured = false;
-            measureNode(spotRef.current, spot => {
-                measured = true;
-                if ((spot.width < 4 || spot.height < 4) && !inner && rec?.inner) setInner(true);
-            });
-            setTimeout(safe("pip inline empty", () => {
-                if (!measured && !inner && rec?.inner) setInner(true);
-            }), 300);
-        }), 700);
-        const b = setTimeout(safe("pip inline check late", () => check(true)), 2000);
-        return () => {
-            clearTimeout(a);
-            clearTimeout(b);
-        };
-    }, [source != null, template, inner]);
+    const source = active && on && present ? pinIcon() : null;
     let content: any = null;
     if (source != null && template && me.pid) {
-        const clone = cloneOf(template, pinConfig(me.pid, source));
-        const inset = insets.get(kind) ?? insets.get(stream.current ? "camera" : "stream") ?? { right: 8, bottom: 8, from: "default" };
+        const clone = cloneOf(template, { ...pinConfig(me.pid, source), keep: true, unflip: true });
         if (clone) {
             inlineRenders++;
-            content = <View key="cheeseburger-inline-spot" ref={spotRef} collapsable={false} pointerEvents="box-none" style={{ position: "absolute", right: inset.right, bottom: inset.bottom }}>
-                <Guard>{clone}</Guard>
+            if (button) fromRender++;
+            else fromMarker++;
+            const blocked = levels.some(l => l.pointerEvents === "none" || l.pointerEvents === "box-only");
+            content = <View key="cheeseburger-pin-flip" collapsable={false} pointerEvents={blocked ? "none" : "box-none"} style={[FILL, FLIP]}>
+                <Levels levels={levels} fill>
+                    <Guard>{clone}</Guard>
+                </Levels>
             </View>;
         }
-    } else if (me.pid && !rec) me.why = fc.current ? "maximize not matched" : "controls not found above";
-    if (!content && me.why !== "starting") noteInline(`not shown: ${me.why}${me.pid ? "" : " (no tile)"}${rec ? "" : `, markers ${markers.size}`}`);
-    return <View
-        ref={ref}
-        collapsable={false}
-        pointerEvents="box-none"
-        style={FILL}
-        onLayout={safe("pip inline layout", (e: any) => {
-            const l = e?.nativeEvent?.layout;
-            if (!l) return;
-            box.current = { width: l.width, height: l.height };
-            place();
-        })}
-    >
+    } else if (me.pid && !me.mine) me.why = template ? "off" : fc.current ? "waiting for maximize" : "controls not found above";
+    return <View ref={ref} collapsable={false} pointerEvents="box-none" style={FILL}>
         {content}
     </View>;
 }
@@ -892,6 +1187,25 @@ const fcTypes = new Set<any>();
 let fcNote = "waiting for discord's controls";
 const fcUnpatches: (() => unknown)[] = [];
 
+function findButton(tree: any): { button: any; path: any[]; } | null {
+    const walk = (el: any, path: any[], depth: number): { button: any; path: any[]; } | null => {
+        if (Array.isArray(el)) {
+            for (const child of el) {
+                const r = walk(child, path, depth);
+                if (r) return r;
+            }
+            return null;
+        }
+        if (!el || typeof el !== "object" || !("$$typeof" in el) || depth > 9) return null;
+        const p = el.props ?? {};
+        if (p[MARK] || el.key === INLINE) return null;
+        if (depth > 0 && focusLabel(p)) return { button: el, path };
+        if (p.children == null || typeof p.children !== "object") return null;
+        return walk(p.children, depth === 0 ? path : [...path, el], depth + 1);
+    };
+    return walk(tree, [], 0);
+}
+
 const addInline = safe("pip pin controls host", (args: any[], ret: any) => {
     if (!active || !ret || typeof ret !== "object" || !("$$typeof" in ret) || isPipRender()) return;
     const props = ret.props ?? {};
@@ -899,7 +1213,15 @@ const addInline = safe("pip pin controls host", (args: any[], ret: any) => {
     if (typeof ch === "function") return;
     const list = ch == null ? [] : Array.isArray(ch) ? ch : [ch];
     if (list.some((c: any) => c?.key === INLINE)) return;
-    return { ...ret, props: { ...props, children: [...list, React.createElement(Shell, { key: INLINE, part: "InlinePin", props: { owner: args?.[0] } })] } };
+    const found = findButton(ret);
+    if (labOn() && Date.now() - labElementsAt > 1500) {
+        labElementsAt = Date.now();
+        const out: string[] = [];
+        elementLines(ret, 1, out);
+        labElements = out;
+    }
+    const pin = React.createElement(Shell, { key: INLINE, part: "InlinePin", props: { owner: args?.[0], button: found?.button ?? null, path: found?.path ?? [] } });
+    return { ...ret, props: { ...props, children: [...list, pin] } };
 });
 
 const CONTROLS_PATH = /VoicePanelCardFloatingControls\.tsx$/;
@@ -938,7 +1260,7 @@ function hookAllWith(type: any, where: string): number {
             const m = mods[id];
             if (!m?.isInitialized) continue;
             const exp = m.publicModule?.exports;
-            if (!exp || typeof exp !== "object" && typeof exp !== "function" || hookedObjects.has(exp)) continue;
+            if (!exp || typeof exp !== "object" && typeof exp !== "function") continue;
             let keys: string[];
             try {
                 keys = Object.keys(exp);
@@ -997,6 +1319,34 @@ function patchControls(chain: any[]) {
     if (!hookAllWith(type, nameOf(type) || "controls")) fcNote = `controls rendered by an unhooked copy (${nameOf(type)})`;
 }
 
+export function startPins() {
+    active = true;
+    hookControlsEarly(0);
+    G.__cheeseburgerPinImpl = { TilePin: Pin, InlinePin, Marker };
+    for (const bump of [...shells]) {
+        try {
+            bump();
+        } catch { }
+    }
+}
+
+export function stopPins() {
+    active = false;
+    if (controlsTimer) clearTimeout(controlsTimer);
+    controlsTimer = null;
+    for (const u of fcUnpatches.splice(0)) {
+        try {
+            u();
+        } catch { }
+    }
+    fcType = null;
+    fcTypes.clear();
+    hookCount = 0;
+    owners.clear();
+    markers.clear();
+    latest = null;
+    notifyNow();
+}
 
 export function tilePinFor(props: any): any {
     if (!active || !props?.sharedCoords || isPipRender()) return null;
@@ -1010,14 +1360,14 @@ export function pinControlsDebug(): string[] {
     const A = animatedView();
     const rec = latest ?? [...markers][0] ?? null;
     return [
-        `pins: hosts ${hosts}, owners ${owners.size}, markers ${markers.size} (ever ${markersEver}, injected ${injected}), fibers ${fibersFound} found ${fibersMissing} missing, matched tree ${matchedByTree} box ${matchedByBox}, clone renders ${cloneRenders}, plain renders ${fallbackRenders}, clone errors ${cloneErrors}, reanimated ${A ? "found" : "missing"}, safe area ${safeAreaNote()}`,
+        `pins: inline mounts ${inlineMounts}, renders ${inlineRenders} (from render ${fromRender}, from markers ${fromMarker}), live ${[...inlines.values()].map(r => r.why).join(", ") || "none"}, clone errors ${cloneErrors}, reanimated ${A ? "found" : "missing"}`,
         `controls hook: ${fcNote}`,
-        `inline pins: mounts ${inlineMounts}, renders ${inlineRenders}, ${[...inlines.values()].map(r => `${r.pid ? "tile" : "?"} ${r.why}`).join(", ") || "none live"}`,
-        ...inlineNotes.map(n => `  inline ${n}`),
-        `pin spots: ${[...insets.entries()].map(([k, v]) => `${k} right ${v.right} bottom ${v.bottom} (${v.from})`).join(", ") || "default 8,8"}`,
+        `flip: ${unflipNotes.join("; ") || "nothing wrapped yet"}`,
+        `fallback layer: hosts ${hosts}, owners ${owners.size}, markers ${markers.size} (ever ${markersEver}, injected ${injected}), fibers ${fibersFound} found ${fibersMissing} missing, clone renders ${cloneRenders}, plain renders ${fallbackRenders}, safe area ${safeAreaNote()}`,
         ...(rec ? [`maximize button now: ${nameOf(rec.template?.type) || "anonymous"}${rec.rect ? ` at ${Math.round(rec.rect.x)},${Math.round(rec.rect.y)} ${Math.round(rec.rect.width)}x${Math.round(rec.rect.height)}` : ""}`] : []),
         ...lastSeen,
         ...seenButtons.map(p => `  labelled ${p}`),
         ...seenSizes.map(s => `  skipped ${s}`),
+        ...labRuns.slice(-2).flat(),
     ];
 }

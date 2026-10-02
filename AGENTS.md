@@ -91,12 +91,24 @@ Details for `split/`:
   - `streamId` identifies the video.
 - Tile overlay buttons are `Pressable > ButtonPill > Icon` with labels like "Stop Watching" and "Focus <name>".
   - The background is `#00000085`, radius 8, and it's animated. For a real cut, the color-only animation is stripped (`stillStyle` in `style/index.tsx`).
+- The X, maximize and name pill live in `VoicePanelCardFloatingControls.tsx` (default export, named `FloatingControls`). It follows the visible card in split view too.
+  - Maximize is an anonymous component with props `{icon, onPress, style: {position: absolute, top: 8, right: 8}, layout, accessibilityLabel}`, wrapping an IconButton, then a PressableScale, then `Pressable > ButtonPill > Icon`.
+  - X and maximize hide by sliding out past the card's top edge, and the card clips them. So a copy at the bottom must slide the other way, or it shows in the middle of the tile while hidden.
+  - Discord's RN is 0.84 (Fabric only) with Reanimated 4, matching `package.json`.
+
+**Pin buttons (`split/PipPin.tsx`)**
+- `FloatingControls` is hooked through every module export that holds it. Its render output gets an `InlinePin` appended.
+- The pin is a copy of Discord's maximize element inside a full-size `scaleY: -1` container. That mirrors its spot (top 8 to bottom 8) and its slide animation. The button inside is flipped back so the icon and bevel stay upright.
+- The pin lab: on every show or hide of the controls, it samples where maximize, the pin, X and the name pill sit for about 1.5s. It dumps the controls' tree and uploads `lab-latest.txt` to the debug repo (setting "Pin reports", 12 uploads per session max). Read it before changing pin code.
+- Older paths are still there as fallbacks: markers injected into Discord's maximize `Pressable` (for presence and its rect) and `TilePin` beside the video renderer (only used when the controls hook fails).
 
 ## Debugging workflow
 
 Charles taps **Send debug** in Cheeseburger settings. A crash also sends one automatically about 20 seconds after Discord reopens.
 
 The report goes to his private debug repo as `latest.txt`, plus a timestamped copy in `debug/`. It's anonymized: people show up as "me" and "person N", and IDs are replaced.
+Pin lab reports land in the same repo as `lab-latest.txt` and `lab/`, on their own during calls.
+He usually sends reports from the settings page, after the call screen is closed, so anything you need from the call screen has to be remembered until then.
 
 Read `latest.txt` before guessing. It includes versions, settings, the call, crashes, split, PiP, style, share, volume and rotate. When something is unclear, add a line to the relevant `*Debug()` function and ask him to send again.
 
