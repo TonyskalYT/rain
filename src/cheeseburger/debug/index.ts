@@ -1,12 +1,13 @@
 import { hotStatus } from "@api/hot/status";
 import { NativeClientInfoModule } from "@api/native/modules";
+import { waitForHydration } from "@api/storage";
 import { findByStoreName } from "@metro";
 import { SelectedChannelStore, UserStore } from "@metro/common/stores";
 import { pluginInstances } from "@plugins";
 import { getCurrentTheme } from "@plugins/_core/painter/themes";
 import { AppState, Dimensions, PixelRatio, Platform, StatusBar } from "react-native";
 
-import { caught, crashDebug, lastCrashAt } from "../crash";
+import { caught, crashDebug, lastCrashAt, safe } from "../crash";
 import { useDeafenButtonSettings } from "../deafen/storage";
 import { lookDebug } from "../look";
 import { rotateDebug } from "../rotate";
@@ -26,7 +27,7 @@ import { toolbarDebug } from "../toolbar";
 import { buildRevision } from "../updates";
 import { volumeDebug } from "../volume";
 import { useVolumeBoostSettings } from "../volume/storage";
-import { debugSettings } from "./storage";
+import { debugLink, debugSettings, useDebugLink, useDebugSettings } from "./storage";
 
 const started = Date.now();
 const API = "https://api.github.com";
@@ -280,11 +281,15 @@ export async function connectDebug(repo: string, token: string): Promise<string>
     debugSettings.repo = r;
     debugSettings.token = t;
     debugSettings.verified = true;
+    debugLink.repo = r;
+    debugLink.token = t;
     debugSettings.status = "";
     return "";
 }
 
 export function disconnectDebug() {
+    debugLink.repo = "";
+    debugLink.token = "";
     debugSettings.repo = "";
     debugSettings.token = "";
     debugSettings.verified = false;
@@ -297,6 +302,7 @@ let sending: Promise<string> | null = null;
 export function sendDebug(reason = "sent"): Promise<string> {
     if (sending) return sending;
     sending = (async () => {
+        restoreLink();
         const repo = debugSettings.repo;
         const token = debugSettings.token;
         if (!token || !REPO.test(repo) || !debugSettings.verified) return "connect it first";
@@ -322,7 +328,22 @@ export function sendDebug(reason = "sent"): Promise<string> {
 
 let crashTimer: ReturnType<typeof setTimeout> | null = null;
 
+function restoreLink() {
+    if (debugSettings.verified && debugSettings.token && debugSettings.repo) {
+        if (debugLink.token !== debugSettings.token || debugLink.repo !== debugSettings.repo) {
+            debugLink.repo = debugSettings.repo;
+            debugLink.token = debugSettings.token;
+        }
+        return;
+    }
+    if (!debugLink.token || !REPO.test(debugLink.repo)) return;
+    debugSettings.repo = debugLink.repo;
+    debugSettings.token = debugLink.token;
+    debugSettings.verified = true;
+}
+
 export function startDebug() {
+    void Promise.all([waitForHydration(useDebugSettings), waitForHydration(useDebugLink)]).then(safe("debug restore", restoreLink), () => { });
     if (crashTimer) clearTimeout(crashTimer);
     crashTimer = setTimeout(() => {
         crashTimer = null;

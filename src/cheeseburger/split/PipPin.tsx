@@ -25,7 +25,7 @@ const RELATIVE = { position: "relative", top: undefined, left: undefined, right:
 interface Level { name: string; handles: any[]; motion: any; entering?: any; exiting?: any; pointerEvents?: string; moving: string; }
 interface Box { x: number; y: number; width: number; height: number; }
 interface Template { type: any; props: any; }
-interface MarkerRec { size?: { width: number; height: number; }; button: any; node: any; fiber: any; chain: any[]; outer: number; template: Template | null; rect?: Box & { at: number; }; sig: string; }
+interface MarkerRec { inner?: Template | null; size?: { width: number; height: number; }; button: any; node: any; fiber: any; chain: any[]; outer: number; template: Template | null; rect?: Box & { at: number; }; sig: string; }
 interface Inset { right: number; bottom: number; from: string; }
 interface PinConfig { label: string; onPress: () => void; source: number; tint?: string; }
 interface InlineRec { pid: string | null; mine: boolean; placed: boolean; why: string; }
@@ -217,8 +217,18 @@ function inspect(rec: MarkerRec) {
     } else if (rec.button) {
         rec.template = { type: rec.button.type, props: withoutMarker(rec.button.props) };
     } else rec.template = null;
+    rec.inner = null;
+    for (let i = outer - 1; i >= 0; i--) {
+        const props = chain[i].memoizedProps;
+        if (focusLabel(props) && props.layout === undefined && (props.variant !== undefined || props.size !== undefined)) {
+            rec.inner = { type: chain[i].elementType ?? chain[i].type, props: withoutMarker(props) };
+            break;
+        }
+    }
     const levels = chain.slice(outer + 1, outer + 13).map(f => levelOf(f.elementType ?? f.type, f.memoizedProps));
+    const shape = (v: any) => v === null ? "null" : Array.isArray(v) ? `array${v.length}` : typeof v === "object" ? `{${Object.keys(v).slice(0, 6).join(",")}}` : typeof v;
     lastSeen = [
+        `maximize props: ${Object.entries(rec.template?.props ?? {}).filter(([k]) => k !== "children").slice(0, 10).map(([k, v]) => `${k}=${shape(v)}`).join(" ")}${rec.inner ? `, inner ${nameOf(rec.inner.type) || "anonymous"}` : ", no inner"}`,
         `maximize button (last seen ${new Date().toISOString().slice(11, 19)}): ${nameOf(rec.template?.type) || "anonymous"} depth ${outer}, keys=${Object.keys(rec.template?.props ?? {}).slice(0, 14).join(",")}`,
         `maximize parents: ${levels.map((l, i) => `${i}:${l.name}${l.moving ? ` moves ${l.moving}` : ""}${l.handles.length ? ` handles ${l.handles.length}` : ""}${l.motion ? " rn-animated" : ""}${l.entering ? " entering" : ""}${l.exiting ? " exiting" : ""}${l.pointerEvents ? ` pe=${l.pointerEvents}` : ""}`).join(" < ") || "none"}`,
     ];
@@ -710,7 +720,7 @@ function cloneOf(template: Template, config: PinConfig): any {
 function noteInline(line: string) {
     if (inlineNotes.includes(line)) return;
     inlineNotes.push(line);
-    if (inlineNotes.length > 4) inlineNotes.shift();
+    if (inlineNotes.length > 8) inlineNotes.shift();
 }
 
 function findDown(root: any, limit: number): any {
@@ -757,6 +767,8 @@ function InlinePin({ owner }: { owner: any; }) {
     const fc = React.useRef<any>(null);
     const stream = React.useRef(false);
     const box = React.useRef<{ width: number; height: number; } | null>(null);
+    const spotRef = React.useRef<any>(null);
+    const [inner, setInner] = React.useState(false);
 
     React.useLayoutEffect(() => {
         inlineMounts++;
@@ -823,13 +835,37 @@ function InlinePin({ owner }: { owner: any; }) {
     }, [rec, me.pid]);
 
     const source = active && on && me.pid && !me.mine && rec?.template ? pinIcon() : null;
+    const template = inner && rec?.inner ? rec.inner : rec?.template;
+    React.useEffect(() => {
+        if (source == null || !template) return;
+        const check = (late: boolean) => measureNode(ref.current, area => measureNode(spotRef.current, spot => {
+            noteInline(`spot ${Math.round(spot.width)}x${Math.round(spot.height)} at ${Math.round(spot.x - area.x)},${Math.round(spot.y - area.y)} in ${Math.round(area.width)}x${Math.round(area.height)} (${inner ? "inner" : "outer"}${late ? ", later" : ""})`);
+        }));
+        const a = setTimeout(safe("pip inline check", () => {
+            check(false);
+            if (!spotRef.current) return;
+            let measured = false;
+            measureNode(spotRef.current, spot => {
+                measured = true;
+                if ((spot.width < 4 || spot.height < 4) && !inner && rec?.inner) setInner(true);
+            });
+            setTimeout(safe("pip inline empty", () => {
+                if (!measured && !inner && rec?.inner) setInner(true);
+            }), 300);
+        }), 700);
+        const b = setTimeout(safe("pip inline check late", () => check(true)), 2000);
+        return () => {
+            clearTimeout(a);
+            clearTimeout(b);
+        };
+    }, [source != null, template, inner]);
     let content: any = null;
-    if (source != null && rec?.template && me.pid) {
-        const clone = cloneOf(rec.template, pinConfig(me.pid, source));
+    if (source != null && template && me.pid) {
+        const clone = cloneOf(template, pinConfig(me.pid, source));
         const inset = insets.get(kind) ?? insets.get(stream.current ? "camera" : "stream") ?? { right: 8, bottom: 8, from: "default" };
         if (clone) {
             inlineRenders++;
-            content = <View key="cheeseburger-inline-spot" pointerEvents="box-none" style={{ position: "absolute", right: inset.right, bottom: inset.bottom }}>
+            content = <View key="cheeseburger-inline-spot" ref={spotRef} collapsable={false} pointerEvents="box-none" style={{ position: "absolute", right: inset.right, bottom: inset.bottom }}>
                 <Guard>{clone}</Guard>
             </View>;
         }

@@ -20,3 +20,11 @@ export const {
     status: "",
     verified: false,
 });
+
+export const {
+    useStore: useDebugLink,
+    settings: debugLink,
+} = createPluginStore<{ repo: string; token: string; }>("cheeseburger-debug-link", {
+    repo: "",
+    token: "",
+});
