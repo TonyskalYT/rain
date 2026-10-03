@@ -122,6 +122,13 @@ export default function Settings() {
                             <TableRow label="Icon size" trailing={<NumberField value={deafen.iconSize} onCommit={n => deafen.updateSettings({ iconSize: n || 24 })} />} />
                         </>
                     )}
+                    <TableSwitchRow
+                        label="Voice controls"
+                        subLabel="mic volume and distortion, swipe up on the call bar"
+                        icon={icon("MicrophoneIcon", "ic_mic_24px")}
+                        value={s.voice !== false}
+                        onValueChange={(v: boolean) => setFeature("voice", v)}
+                    />
                 </TableRowGroup>
 
                 <TableRowGroup title="Video">

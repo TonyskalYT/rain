@@ -63,6 +63,7 @@ If the release comes back 404, the `latest` release was left as a draft. Push an
 | `split/PipPin.tsx` | Pin buttons on video tiles |
 | `rotate/` | Rotate button |
 | `share/` | Moves "share screen" from the toolbar into the swipe-up menu |
+| `voice/` | "voice" section in the swipe-up menu: mic volume past 100% and distortion with a strength slider |
 | `style/` | GX-style bevels: top-left and bottom-right corners cut. `shapes.tsx` draws the cut shape |
 | `updates/` | Hot updates and the "Update now" button |
 
@@ -96,6 +97,13 @@ Details for `split/`:
   - X and maximize hide by sliding out past the card's top edge, and the card clips them. So a copy at the bottom must slide the other way, or it shows in the middle of the tile while hidden.
   - Discord's RN is 0.84 (Fabric only) with Reanimated 4, matching `package.json`.
 
+**Voice section (`voice/`)**
+- The section is a `TableRowGroup` placed right after the element that holds the swipe-up rows (exports of `VoicePanelVoiceControlsButtons.tsx`, `ChatButton` counts most). Mounted copies go through a `Shell` that renders `globalThis.__cheeseburgerVoiceImpl`, so hot swaps take over open menus.
+- Slider rows are `TableRow`s with a node as `label` (title, percent and slider).
+- Mic gain hooks `setInputVolume` on the lowest layer that sees Discord's calls: native module, then `VoiceEngine`, then the `MediaEngine` instance. A layer is skipped when it's blocked or when a replay (`getMediaEngine().setInputVolume(MediaEngineStore.getInputVolume())`) doesn't reach it.
+- Whatever Discord sends is multiplied by mic% x distortion gain (6 to 32 dB, total capped at x200). Stopping sends Discord's own value back.
+- While distortion is on, `Connection.setAutomaticGainControl` is forced to false on the default connection and restored after.
+
 **Pin buttons (`split/PipPin.tsx`)**
 - `FloatingControls` is hooked through every module export that holds it. Its render output gets an `InlinePin` appended.
 - The pin is a copy of Discord's maximize element inside a full-size `scaleY: -1` container. That mirrors its spot (top 8 to bottom 8) and its slide animation. The button inside is flipped back so the icon and bevel stay upright.
@@ -117,3 +125,4 @@ Read `latest.txt` before guessing. It includes versions, settings, the call, cra
 - The in-app floating PiP (not Android PiP) may ignore pins. Its source isn't identified yet; the debug report logs the PiP components' inputs.
 - The Messages button in the guild rail is scoped for a bevel through its "Messages" label. It's unconfirmed on the phone.
 - Volume boost beyond 200% is unverified.
+- Mic volume past 100% and distortion are unverified. The debug report's `voice` section shows which layer is hooked and what was sent.

@@ -25,7 +25,8 @@ import { accentColor, baseColor } from "../style/colors";
 import { useStyleSettings } from "../style/storage";
 import { toolbarDebug } from "../toolbar";
 import { buildRevision } from "../updates";
-import { voiceProbeDebug } from "../voice/probe";
+import { voiceDebug } from "../voice";
+import { useVoiceSettings } from "../voice/storage";
 import { volumeDebug } from "../volume";
 import { useVolumeBoostSettings } from "../volume/storage";
 import { debugLink, debugSettings, useDebugLink, useDebugSettings } from "./storage";
@@ -190,6 +191,7 @@ function setup(): string[] {
         `volume ${plain(volume, ["boosted"])}, boosted ${Object.keys(volume.boosted ?? {}).length}`,
         `style ${plain(state(useStyleSettings))}`,
         `share ${plain(state(useShareSettings))}`,
+        `voice ${plain(state(useVoiceSettings))}`,
         `theme ${theme?.id ?? "none"} ${theme?.data?.name ?? ""}, base ${baseColor() ?? "?"}, accent ${accentColor("?")}`,
         `plugins ${[...pluginInstances.keys()].join(", ").slice(0, 500)}`,
     ];
@@ -206,7 +208,7 @@ export function debugReport(): string {
         ["style", () => [...styleDebug(), lookDebug(), toolbarDebug()]],
         ["share", shareDebug],
         ["volume", volumeDebug],
-        ["voice", voiceProbeDebug],
+        ["voice", voiceDebug],
         ["rotate", rotateDebug],
     ];
     const out = [`cheeseburger debug ${stamp(Date.now())}`];
