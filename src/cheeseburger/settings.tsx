@@ -124,7 +124,7 @@ export default function Settings() {
                     )}
                     <TableSwitchRow
                         label="Voice controls"
-                        subLabel="mic volume and distortion, swipe up on the call bar"
+                        subLabel="voice effects row in the swipe-up menu"
                         icon={icon("MicrophoneIcon", "ic_mic_24px")}
                         value={s.voice !== false}
                         onValueChange={(v: boolean) => setFeature("voice", v)}

@@ -1,16 +1,20 @@
 import { after } from "@api/patcher";
 import { jsxRuntime } from "@api/react/jsx";
 import { waitForHydration } from "@api/storage";
+import { hideSheet } from "@api/ui/sheets";
 import { React } from "@metro/common";
 
 import { caught, safe } from "../crash";
 import { micDebug, startMic, stopMic } from "./mic";
 import { voiceProbeDebug } from "./probe";
-import { noteSlider, resetSection, Section, sectionDebug } from "./Section";
+import { MenuGroup, MenuRow, opened } from "./Row";
+import { SHEET } from "./Sheet";
 import { useVoiceSettings } from "./storage";
+import { noteSlider, resetUi, sliderFrom, sliderType, widths } from "./ui";
 
 const ROWS = /\/VoicePanelVoiceControlsButtons\.tsx$/;
 const KEY = "cheeseburger-voice";
+const VOICE_GROUP = /^voice settings$/i;
 const G = globalThis as any;
 const shells: Set<() => void> = G.__cheeseburgerVoiceShells ??= new Set();
 const unpatches: (() => unknown)[] = [];
@@ -19,12 +23,17 @@ let rowTypes: Set<any> | null = null;
 let chatType: any = null;
 let lookTimer: ReturnType<typeof setTimeout> | null = null;
 let busy = false;
+let menuPass = false;
+let menuPasses = 0;
+let groupSeen = false;
 let placed = 0;
+let placedIn = "";
 let group = "";
 let failures = 0;
 let lastError = "";
+let lastLoad = 0;
 
-class Shell extends React.Component<{}, { failed: boolean; n: number; }> {
+class Shell extends React.Component<{ part: string; [k: string]: any; }, { failed: boolean; n: number; }> {
     state = { failed: false, n: 0 };
 
     bump = () => this.setState(s => ({ failed: false, n: s.n + 1 }));
@@ -44,13 +53,14 @@ class Shell extends React.Component<{}, { failed: boolean; n: number; }> {
     componentDidCatch(e: any) {
         failures++;
         lastError = String(e?.message ?? e).slice(0, 120);
-        caught("voice section", e);
+        caught("voice row", e);
     }
 
     render() {
         if (this.state.failed) return null;
-        const Impl = G.__cheeseburgerVoiceImpl?.Section;
-        return Impl ? React.createElement(Impl) : null;
+        const { part, ...rest } = this.props;
+        const Impl = G.__cheeseburgerVoiceImpl?.[part];
+        return Impl ? React.createElement(Impl, rest) : null;
     }
 }
 
@@ -104,6 +114,8 @@ function rows(ch: any, set: Set<any>, depth = 0): number {
     return 0;
 }
 
+const ours = (ch: any) => (Array.isArray(ch) ? ch : [ch]).some((c: any) => c?.key === KEY);
+
 function describe(el: any): string {
     const ch = el?.props?.children;
     const list = (Array.isArray(ch) ? ch : [ch]).filter(c => c && typeof c === "object").slice(0, 12).map((c: any) => {
@@ -113,8 +125,6 @@ function describe(el: any): string {
     const keys = Object.keys(el?.props ?? {}).filter(k => k !== "children").slice(0, 8).join(",");
     return `${nameOf(el?.type) || "?"} {${keys}} with ${list.join(", ")}`;
 }
-
-let lastLoad = 0;
 
 function afterJsx(args: any[], ret: any) {
     const props = args[1];
@@ -127,24 +137,44 @@ function afterJsx(args: any[], ret: any) {
         }
     }
     const set = rowTypes;
-    if (!set || busy || !ret || typeof ret !== "object" || ret.key === KEY || ret.type === React.Fragment || set.has(ret.type)) return;
-    const ch = ret.props?.children;
-    if (ch == null || typeof ch !== "object" || rows(ch, set) < 2) return;
+    if (!set || !ret || typeof ret !== "object" || ret.type === React.Fragment || set.has(ret.type)) return;
+    const p = ret.props;
+    const ch = p?.children;
+    if (ch == null || typeof ch !== "object") return;
+    const title = typeof p.title === "string" ? p.title.trim() : "";
+    if (title && VOICE_GROUP.test(title)) {
+        if (ours(ch) || !menuPass && !rows(ch, set)) return;
+        groupSeen = true;
+        placed++;
+        placedIn = "top of voice settings";
+        group = describe(ret);
+        const list = Array.isArray(ch) ? ch : [ch];
+        return { ...ret, props: { ...p, children: [React.createElement(Shell, { key: KEY, part: "MenuRow" }), ...list] } };
+    }
+    if (busy || rows(ch, set) < 2) return;
     busy = true;
+    menuPass = true;
     Promise.resolve().then(() => {
         busy = false;
+        menuPass = false;
     });
+    menuPasses++;
+    if (groupSeen || menuPasses < 3) return;
     placed++;
+    placedIn = "after the first group";
     group = describe(ret);
-    return React.createElement(React.Fragment, { key: ret.key ?? undefined }, ret, React.createElement(Shell, { key: KEY }));
+    return React.createElement(React.Fragment, { key: ret.key ?? undefined }, ret, React.createElement(Shell, { key: KEY, part: "MenuGroup" }));
 }
 
 export function voiceDebug(): string[] {
+    try {
+        sliderType(true);
+    } catch { }
     return [
         ...micDebug(),
-        `section: rows ${rowTypes ? `found (${rowTypes.size})` : "not yet"}, placed ${placed}, showing ${shells.size}${failures ? `, failed ${failures} (${lastError})` : ""}`,
+        `menu: rows ${rowTypes ? `found (${rowTypes.size})` : "not yet"}, menu renders ${menuPasses}, placed ${placed}${placedIn ? ` (${placedIn})` : ""}, showing ${shells.size}, sheet opened ${opened}${failures ? `, failed ${failures} (${lastError})` : ""}`,
         `group: ${group || "not seen yet"}`,
-        ...sectionDebug(),
+        `slider: ${sliderFrom || "not rendered yet"}, widths ${Object.entries(widths).map(([k, v]) => `${k}=${v}`).join(" ") || "-"}`,
         ...voiceProbeDebug(),
     ];
 }
@@ -152,7 +182,7 @@ export function voiceDebug(): string[] {
 export default {
     async start() {
         await waitForHydration(useVoiceSettings);
-        G.__cheeseburgerVoiceImpl = { Section };
+        G.__cheeseburgerVoiceImpl = { MenuRow, MenuGroup };
         bumpShells();
         look(0);
         const hook = safe("voice jsx", afterJsx);
@@ -172,11 +202,14 @@ export default {
         rowTypes = null;
         chatType = null;
         lastLoad = 0;
-        busy = false;
-        resetSection();
+        busy = menuPass = false;
+        resetUi();
         if (!G.__cheeseburgerSwapping) {
             G.__cheeseburgerVoiceImpl = null;
             bumpShells();
+            try {
+                hideSheet(SHEET);
+            } catch { }
         }
     },
 };

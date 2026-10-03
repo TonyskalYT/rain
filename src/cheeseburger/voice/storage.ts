@@ -1,9 +1,11 @@
 import { createPluginStore } from "@api/storage";
 
-interface VoiceSettings {
+export interface VoiceSettings {
     mic: number;
     drive: boolean;
     driveAmount: number;
+    lofi: boolean;
+    lofiAmount: number;
 }
 
 export const {
@@ -13,4 +15,6 @@ export const {
     mic: 100,
     drive: false,
     driveAmount: 50,
+    lofi: false,
+    lofiAmount: 50,
 });

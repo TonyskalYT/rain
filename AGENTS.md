@@ -63,7 +63,7 @@ If the release comes back 404, the `latest` release was left as a draft. Push an
 | `split/PipPin.tsx` | Pin buttons on video tiles |
 | `rotate/` | Rotate button |
 | `share/` | Moves "share screen" from the toolbar into the swipe-up menu |
-| `voice/` | "voice" section in the swipe-up menu: mic volume past 100% and distortion with a strength slider |
+| `voice/` | "voice effects" row in the swipe-up menu that opens a sheet: presets, mic volume past 100%, distortion, lo-fi, reset |
 | `style/` | GX-style bevels: top-left and bottom-right corners cut. `shapes.tsx` draws the cut shape |
 | `updates/` | Hot updates and the "Update now" button |
 
@@ -97,15 +97,19 @@ Details for `split/`:
   - X and maximize hide by sliding out past the card's top edge, and the card clips them. So a copy at the bottom must slide the other way, or it shows in the middle of the tile while hidden.
   - Discord's RN is 0.84 (Fabric only) with Reanimated 4, matching `package.json`.
 
-**Voice section (`voice/`)**
-- The section is a `TableRowGroup` placed right after the element that holds the swipe-up rows (exports of `VoicePanelVoiceControlsButtons.tsx`, `ChatButton` counts most). Mounted copies go through a `Shell` that renders `globalThis.__cheeseburgerVoiceImpl`, so hot swaps take over open menus.
-- Slider rows are `TableRow`s with a node as `label` (title, percent and slider).
-- Mic gain hooks `setInputVolume` on the lowest layer that sees Discord's calls: native module, then `VoiceEngine`, then the `MediaEngine` instance. A layer is skipped when it's blocked or when a replay (`getMediaEngine().setInputVolume(MediaEngineStore.getInputVolume())`) doesn't reach it.
+**Voice effects (`voice/`)**
+- The swipe-up menu gets one "voice effects" row at the top of Discord's "Voice Settings" group (found by its title, only in the same render as the swipe-up rows). If that group never shows up, the row goes in its own group after the first one. Tapping it opens `VoiceSheet` (`voice/Sheet.tsx`): presets, mic volume, distortion, lo-fi and reset.
+- Mounted rows go through a `Shell` that renders `globalThis.__cheeseburgerVoiceImpl`, so hot swaps take over open menus.
+- Slider rows are `TableRow`s with a node as `label`. Discord's `Text` no longer knows `text-normal` (it renders dark), so labels take their color from the theme (`TEXT_DEFAULT`).
+- Mic gain hooks `setInputVolume` on the lowest layer that sees Discord's calls: native module, then `VoiceEngine`, then the `MediaEngine` instance. A layer is skipped when it's blocked or when a replay (`getMediaEngine().setInputVolume(MediaEngineStore.getInputVolume())`) doesn't reach it. The native module gets 1 for Discord's 100%.
 - Whatever Discord sends is multiplied by mic% x distortion gain (6 to 32 dB, total capped at x200). Stopping sends Discord's own value back.
 - While distortion is on, `Connection.setAutomaticGainControl` is forced to false on the default connection and restored after.
+- Lo-fi caps `Connection.setVoiceBitRate` / `setBitRate` (24 kbps down to 8 kbps) and restores Discord's last bitrate after.
+- Real pitch, robot or echo effects aren't possible: Discord's Android engine has no audio processing the mod can reach.
 
 **Pin buttons (`split/PipPin.tsx`)**
 - `FloatingControls` is hooked through every module export that holds it. Its render output gets an `InlinePin` appended.
+- That hook is installed once per Discord session and kept across hot swaps (`globalThis.__cheeseburgerPinFc`). It relays to the current copy through `globalThis.__cheeseburgerPinControls`, so the patched export never changes identity. Unpatching on every swap could leave tiles on a dead proxy, with no pins until the call screen reopened.
 - The pin is a copy of Discord's maximize element inside a full-size `scaleY: -1` container. That mirrors its spot (top 8 to bottom 8) and its slide animation. The button inside is flipped back so the icon and bevel stay upright.
 - The pin lab: on every show or hide of the controls, it samples where maximize, the pin, X and the name pill sit for about 1.5s. It dumps the controls' tree and uploads `lab-latest.txt` to the debug repo (setting "Pin reports", 12 uploads per session max). Read it before changing pin code.
 - Older paths are still there as fallbacks: markers injected into Discord's maximize `Pressable` (for presence and its rect) and `TilePin` beside the video renderer (only used when the controls hook fails).
@@ -125,4 +129,4 @@ Read `latest.txt` before guessing. It includes versions, settings, the call, cra
 - The in-app floating PiP (not Android PiP) may ignore pins. Its source isn't identified yet; the debug report logs the PiP components' inputs.
 - The Messages button in the guild rail is scoped for a bevel through its "Messages" label. It's unconfirmed on the phone.
 - Volume boost beyond 200% is unverified.
-- Mic volume past 100% and distortion are unverified. The debug report's `voice` section shows which layer is hooked and what was sent.
+- Mic volume past 100%, distortion and lo-fi are unverified by ear. The debug report's `voice` section shows which layer is hooked and what was sent.
