@@ -25,6 +25,7 @@ import { accentColor, baseColor } from "../style/colors";
 import { useStyleSettings } from "../style/storage";
 import { toolbarDebug } from "../toolbar";
 import { buildRevision } from "../updates";
+import { voiceProbeDebug } from "../voice/probe";
 import { volumeDebug } from "../volume";
 import { useVolumeBoostSettings } from "../volume/storage";
 import { debugLink, debugSettings, useDebugLink, useDebugSettings } from "./storage";
@@ -205,6 +206,7 @@ export function debugReport(): string {
         ["style", () => [...styleDebug(), lookDebug(), toolbarDebug()]],
         ["share", shareDebug],
         ["volume", volumeDebug],
+        ["voice", voiceProbeDebug],
         ["rotate", rotateDebug],
     ];
     const out = [`cheeseburger debug ${stamp(Date.now())}`];
