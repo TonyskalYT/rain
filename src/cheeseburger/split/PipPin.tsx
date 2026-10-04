@@ -1,13 +1,14 @@
 import { findAsset } from "@api/assets";
 import { findByProps, findByStoreName } from "@metro";
 import { React } from "@metro/common";
-import { Animated as RNAnimated, Easing, Image, Pressable, StyleSheet, View } from "react-native";
+import { Animated as RNAnimated, AppState, Easing, Image, Pressable, StyleSheet, View } from "react-native";
 
 import { caught, safe } from "../crash";
 import { accentColor } from "../style/colors";
 import { isPipRender, mineParticipant, onPinChange, participantForPin, pinnedPip, pinPip } from "./pip";
+import { tileHostNear } from "./probe";
 import { splitViewSettings, useSplitViewSettings } from "./storage";
-import { chromeShown, noteControls, noteSafeArea, onChrome, safeAreaNote } from "./tiles";
+import { chromeShown, hasVideo, noteControls, noteSafeArea, onChrome, safeAreaNote } from "./tiles";
 
 const ICONS = ["PinIcon", "PictureInPictureIcon", "PipIcon", "ic_pip"];
 const MARK = "__cheeseburgerNativePin";
@@ -35,7 +36,7 @@ interface InlineRec { pid: string | null; mine: boolean; why: string; }
 const iconWrappers = new WeakMap<object, any>();
 const markers = new Set<MarkerRec>();
 const listeners = new Set<() => void>();
-const owners = new Map<string, object>();
+const owners = new Map<string, { me: object; rank: number; }>();
 const insets = new Map<string, Inset>();
 const seenButtons: string[] = [];
 const seenSizes: string[] = [];
@@ -710,39 +711,23 @@ function useInsets(): any {
     }
 }
 
-const CLIP = { position: "absolute", left: 0, top: 0, right: 0, bottom: 0, overflow: "hidden", zIndex: 50 } as const;
+const HOST = { position: "absolute", left: 0, top: 0, right: 0, bottom: 0, zIndex: 50 } as const;
+const CLIP = { position: "absolute", left: 0, top: 0, right: 0, bottom: 0, overflow: "hidden" } as const;
 const SPOT = { position: "absolute", right: 8, bottom: 8 } as const;
 const SLIDE = 52;
 
 interface ButtonCap { type: any; extra: any; iconKind: "number" | "component"; }
+interface PinState { layout: { width: number; height: number; } | null; check: string; tries: number; seen: any; }
 let buttonCap: ButtonCap | null = null;
-let upState: boolean | null = null;
-let upFrom = "";
 let slideMs: number | null = null;
 let layoutNote = "";
 let shownPins = 0;
-const upListeners = new Set<() => void>();
-let upQueued = false;
+let maxTop: number | null = null;
+let placedOk = 0;
+let placeMisses = 0;
+const placeNotes: string[] = [];
 
-function noteUp(v: boolean, from: string) {
-    upFrom = from;
-    if (upState === v) return;
-    upState = v;
-    if (upQueued) return;
-    upQueued = true;
-    Promise.resolve().then(() => {
-        upQueued = false;
-        upListeners.forEach(l => {
-            try {
-                l();
-            } catch (e) {
-                caught("pip pin up", e);
-            }
-        });
-    });
-}
-
-const controlsUp = () => upState ?? chromeShown();
+const controlsUp = () => chromeShown();
 
 function noteLayout(layout: any) {
     if (!layout || typeof layout !== "object") return;
@@ -760,7 +745,7 @@ function noteLayout(layout: any) {
 function noteSignals(type: any, props: any, capture: boolean) {
     const f = flat(props.style);
     if (f.position === "absolute" && typeof f.top === "number" && (f.right != null || f.left != null)) {
-        noteUp(f.top >= 0, nameOf(type) || "anonymous");
+        maxTop = f.top;
         if (props.layout) noteLayout(props.layout);
         return;
     }
@@ -771,7 +756,7 @@ function noteSignals(type: any, props: any, capture: boolean) {
         extra: { size: props.size, variant: props.variant, maxFontSizeMultiplier: props.maxFontSizeMultiplier },
         iconKind: typeof props.icon === "number" ? "number" : "component",
     };
-    Promise.resolve().then(notifyNow);
+    Promise.resolve().then(safe("pip pin button", notifyNow));
 }
 
 function PlainPin({ config }: { config: PinConfig; }) {
@@ -795,45 +780,160 @@ function PinButton({ config }: { config: PinConfig; }) {
     return React.createElement(cap.type, { ...cap.extra, icon, onPress: config.onPress, accessibilityLabel: config.label, [MARK]: true });
 }
 
+const notifySoon = () => void Promise.resolve().then(safe("pip pin owners", notifyNow));
+
+function claim(pid: string, me: object, rank: number) {
+    const cur = owners.get(pid);
+    if (cur?.me === me && cur.rank === rank) return;
+    if (cur && cur.me !== me && cur.rank >= rank) return;
+    owners.set(pid, { me, rank });
+    notifySoon();
+}
+
+function release(pid: string, me: object) {
+    if (owners.get(pid)?.me !== me) return;
+    owners.delete(pid);
+    notifySoon();
+}
+
+function roomy(layout: { width: number; height: number; }, c: any) {
+    if (!c || !(c.width > 0) || !(c.height > 0)) return false;
+    return layout.width >= c.width * 0.6 && layout.height >= c.height * 0.6 && (layout.width > c.width + 4 || layout.height > c.height + 4);
+}
+
+function notePlace(line: string) {
+    placeNotes.push(`${new Date().toISOString().slice(11, 19)} ${line}`);
+    if (placeNotes.length > 4) placeNotes.shift();
+}
+
+function boxOf(node: any, done: (b: Box | null) => void) {
+    try {
+        node.measureInWindow(safe("pip pin place measure", (x: number, y: number, width: number, height: number) => {
+            done([x, y, width, height].every(n => typeof n === "number" && Number.isFinite(n)) ? { x, y, width, height } : null);
+        }));
+    } catch {
+        done(null);
+    }
+}
+
+function verifyPlace(host: any, coords: any, done: (ok: boolean, note: string) => void) {
+    const tile = host ? tileHostNear(host, coords) : null;
+    if (!host || !tile || typeof host.measureInWindow !== "function" || typeof tile.measureInWindow !== "function") {
+        done(false, tile ? "pin host not measurable" : "tile not found next to the pin");
+        return;
+    }
+    let hostBox: Box | null = null;
+    let tileBox: Box | null = null;
+    let left = 2;
+    const finish = () => {
+        if (--left) return;
+        const c = readCoords(coords);
+        if (!hostBox || !tileBox || !c) {
+            done(false, "not measured");
+            return;
+        }
+        const dx = tileBox.x - hostBox.x - c.x - (c.width - tileBox.width) / 2;
+        const dy = tileBox.y - hostBox.y - c.y - (c.height - tileBox.height) / 2;
+        const sized = Math.abs(tileBox.width - c.width) <= 3 && Math.abs(tileBox.height - c.height) <= 3;
+        done(Math.abs(dx) <= 2 && Math.abs(dy) <= 2 && sized, `tile ${Math.round(tileBox.width)}x${Math.round(tileBox.height)} at ${Math.round(tileBox.x - hostBox.x)},${Math.round(tileBox.y - hostBox.y)} in ${Math.round(hostBox.width)}x${Math.round(hostBox.height)}, coords ${Math.round(c.x)},${Math.round(c.y)} ${Math.round(c.width)}x${Math.round(c.height)}`);
+    };
+    boxOf(host, b => {
+        hostBox = b;
+        finish();
+    });
+    boxOf(tile, b => {
+        tileBox = b;
+        finish();
+    });
+}
+
+const placeChecks = new Set<() => void>();
+let placeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function placeTick() {
+    placeTimer = null;
+    if (!active || !placeChecks.size) return;
+    if (AppState.currentState === "active") {
+        for (const check of [...placeChecks]) {
+            try {
+                check();
+            } catch (e) {
+                caught("pip pin place", e);
+            }
+        }
+    }
+    placeTimer = setTimeout(safe("pip pin place tick", placeTick), 200);
+}
+
+function watchPlace(check: () => void) {
+    placeChecks.add(check);
+    if (!placeTimer) placeTimer = setTimeout(safe("pip pin place tick", placeTick), 200);
+    return () => void placeChecks.delete(check);
+}
+
 function Pin({ coords, pid }: { coords: any; pid: string; stream: boolean; }) {
     const safeArea = useInsets();
     if (safeArea) noteSafeArea(safeArea);
     const on = useSplitViewSettings((s: any) => s.pipPins !== false);
     const [, force] = React.useReducer((n: number) => n + 1, 0);
-    const [fits, setFits] = React.useState(false);
-    const me = React.useRef({}).current;
-    const owned = fits && (owners.get(pid) ?? me) === me;
+    const me = React.useRef<PinState>({ layout: null, check: "", tries: 0, seen: null }).current;
+    const hostRef = React.useRef<any>(null);
+    const c = readCoords(coords);
+    const room = me.layout;
+    const mode = !room || !c ? "" : sizeOk(room, c) ? "fill" : roomy(room, c) ? "place" : "";
+    const rank = mode === "fill" ? 2 : mode === "place" && me.check === "yes" ? 1 : 0;
+    const owned = rank > 0 && owners.get(pid)?.me === me;
     const show = active && on && owned && controlsUp();
     const anim = React.useRef(new RNAnimated.Value(show ? 1 : 0)).current;
+    me.seen = c && typeof c === "object" ? { x: c.x, y: c.y, width: c.width, height: c.height } : null;
+
+    React.useLayoutEffect(() => {
+        if (active && rank > 0) claim(pid, me, rank);
+        else release(pid, me);
+    });
 
     React.useLayoutEffect(() => {
         hosts++;
         listeners.add(force);
-        upListeners.add(force);
         const offPin = onPinChange(force);
         const offChrome = onChrome(force);
         return () => {
             hosts--;
             listeners.delete(force);
-            upListeners.delete(force);
             offPin();
             offChrome();
-            if (owners.get(pid) === me) {
-                owners.delete(pid);
-                notifyNow();
-            }
+            release(pid, me);
         };
     }, []);
 
     React.useEffect(() => {
-        if (fits && !owners.has(pid)) {
-            owners.set(pid, me);
-            force();
-        } else if (!fits && owners.get(pid) === me) {
-            owners.delete(pid);
-            notifyNow();
-        }
-    }, [fits]);
+        if (mode !== "place") return;
+        return watchPlace(() => {
+            const now = readCoords(coords);
+            const was = me.seen;
+            if (!now || !was || ["x", "y", "width", "height"].some(k => !(Math.abs(now[k] - was[k]) <= 0.5))) force();
+        });
+    }, [mode]);
+
+    React.useEffect(() => {
+        if (mode !== "place" || me.check === "yes") return;
+        const t = setTimeout(safe("pip pin place check", () => {
+            verifyPlace(hostRef.current, coords, (ok, note) => {
+                if (ok) {
+                    placedOk++;
+                    me.check = "yes";
+                    notePlace(`placed ${pid.slice(-4)}: ${note}`);
+                } else {
+                    placeMisses++;
+                    me.tries++;
+                    me.check = `try ${me.tries}`;
+                    if (me.tries === 1 || me.tries % 5 === 0) notePlace(`not placed ${pid.slice(-4)} yet: ${note}`);
+                }
+                force();
+            });
+        }), Math.min(3000, 300 + me.tries * 400));
+        return () => clearTimeout(t);
+    }, [mode, me.check]);
 
     React.useEffect(() => {
         if (show) shownPins++;
@@ -844,24 +944,30 @@ function Pin({ coords, pid }: { coords: any; pid: string; stream: boolean; }) {
 
     const onLayout = React.useMemo(() => safe("pip pin fit", (e: any) => {
         const l = e?.nativeEvent?.layout;
-        if (!l) return;
-        const c = readCoords(coords);
-        const ok = sizeOk(l, c);
-        if (!ok) noteSize(`host ${Math.round(l.width)}x${Math.round(l.height)} vs tile ${Math.round(c?.width)}x${Math.round(c?.height)}`);
-        setFits(ok);
+        if (!l || !(l.width > 0) || !(l.height > 0)) return;
+        const was = me.layout;
+        if (was && Math.abs(was.width - l.width) < 0.5 && Math.abs(was.height - l.height) < 0.5) return;
+        me.layout = { width: l.width, height: l.height };
+        me.check = "";
+        me.tries = 0;
+        const now = readCoords(coords);
+        if (!sizeOk(l, now) && !roomy(l, now)) noteSize(`host ${Math.round(l.width)}x${Math.round(l.height)} vs tile ${Math.round(now?.width)}x${Math.round(now?.height)}`);
+        force();
     }), [coords]);
 
     const source = active && on ? pinIcon() : null;
     const config = source != null ? pinConfig(pid, source) : null;
-    return <View collapsable={false} pointerEvents="box-none" style={CLIP} onLayout={onLayout}>
+    const frameStyle = mode === "place" && c ? { position: "absolute", left: c.x, top: c.y, width: c.width, height: c.height, overflow: "hidden" } as const : CLIP;
+    return <View ref={hostRef} collapsable={false} pointerEvents="box-none" style={HOST} onLayout={onLayout}>
         {config && owned && (
-            <RNAnimated.View
-                key="cheeseburger-pin-spot"
-                pointerEvents={show ? "box-none" : "none"}
-                style={[SPOT, { opacity: anim, transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [SLIDE, 0] }) }] }]}
-            >
-                <Guard fallback={<PlainPin config={config} />}><PinButton config={config} /></Guard>
-            </RNAnimated.View>
+            <View key="cheeseburger-pin-frame" pointerEvents="box-none" style={frameStyle}>
+                <RNAnimated.View
+                    pointerEvents={show ? "box-none" : "none"}
+                    style={[SPOT, { opacity: anim, transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [SLIDE, 0] }) }] }]}
+                >
+                    <Guard fallback={<PlainPin config={config} />}><PinButton config={config} /></Guard>
+                </RNAnimated.View>
+            </View>
         )}
     </View>;
 }
@@ -1298,6 +1404,9 @@ export function startPins() {
 
 export function stopPins() {
     active = false;
+    if (placeTimer) clearTimeout(placeTimer);
+    placeTimer = null;
+    placeChecks.clear();
     owners.clear();
     markers.clear();
     latest = null;
@@ -1307,7 +1416,7 @@ export function stopPins() {
 export function tilePinFor(props: any): any {
     if (!active || !props?.sharedCoords || isPipRender()) return null;
     const participant = participantForPin(props);
-    if (!participant || participant.id == null || mineParticipant(participant)) return null;
+    if (!participant || participant.id == null || mineParticipant(participant) || !hasVideo(participant)) return null;
     const stream = participant.type === 0 || String(participant.id).startsWith("call:");
     return React.createElement(Shell, { key: `cheeseburger-pin-${participant.id}`, part: "TilePin", props: { coords: props.sharedCoords, pid: String(participant.id), stream } });
 }
@@ -1316,8 +1425,9 @@ export function pinControlsDebug(): string[] {
     const A = animatedView();
     const rec = latest ?? [...markers][0] ?? null;
     return [
-        `pins: drawn by cheeseburger, tiles ${hosts}, owned ${owners.size}, shown ${shownPins}x, discord button renders ${cloneRenders}, plain renders ${fallbackRenders}, clone errors ${cloneErrors}, reanimated ${A ? "found" : "missing"}`,
-        `controls: ${controlsUp() ? "up" : "down"} (${upState === null ? `from chrome, ${chromeShown() ? "shown" : "hidden"}` : `from ${upFrom}`}), button ${buttonCap ? `discord's ${nameOf(buttonCap.type) || "anonymous"} size=${String(buttonCap.extra.size)} variant=${String(buttonCap.extra.variant)} icon=${buttonCap.iconKind}` : "plain (discord's not seen yet)"}, slide ${slideMs ?? "300 default"}ms${layoutNote ? ` from ${layoutNote}` : ""}`,
+        `pins: drawn by cheeseburger, hosts ${hosts}, owned ${owners.size}${owners.size ? ` (${[...owners.values()].map(o => (o.rank === 2 ? "in tile" : "placed")).join(", ")})` : ""}, shown ${shownPins}x, placed ok ${placedOk}, place misses ${placeMisses}, discord button renders ${cloneRenders}, plain renders ${fallbackRenders}, clone errors ${cloneErrors}, reanimated ${A ? "found" : "missing"}`,
+        `controls: ${controlsUp() ? "up" : "down"} (call toolbar), maximize top ${maxTop ?? "not seen"}, button ${buttonCap ? `discord's ${nameOf(buttonCap.type) || "anonymous"} size=${String(buttonCap.extra.size)} variant=${String(buttonCap.extra.variant)} icon=${buttonCap.iconKind}` : "plain (discord's not seen yet)"}, slide ${slideMs ?? "300 default"}ms${layoutNote ? ` from ${layoutNote}` : ""}`,
+        ...placeNotes.map(n => `  ${n}`),
         `maximize: ${pinNote}, seen ${siblings}x`,
         `pin states: ${whyLog.join(" | ") || "none yet"}`,
         `flip: ${unflipNotes.join("; ") || "nothing wrapped yet"}`,

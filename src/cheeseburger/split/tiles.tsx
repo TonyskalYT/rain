@@ -6,7 +6,7 @@ import { AppState, Dimensions, StatusBar } from "react-native";
 
 import { caught, safe } from "../crash";
 import { splitRects, stageRects } from "./geometry";
-import { hasTileProbe, hasToolbarRef, measureAll, measured, probeDebug, resetTileMeasurements, toolbarKnown, viewportKey } from "./probe";
+import { anyTileProbes, type ContainerSample, hasTileProbe, hasToolbarRef, measured, measureToolbarNow, onInsets, probeDebug, resetTileMeasurements, sampleContainer, toolbarKnown, viewportKey } from "./probe";
 import { splitViewSettings } from "./storage";
 
 export type TileKind = "stream" | "them" | "me";
@@ -22,7 +22,9 @@ interface Tile {
 }
 
 interface Rect { x: number; y: number; width: number; height: number; z?: number; }
-interface NativeOrigin { x: number; y: number; left?: number; right?: number; }
+interface Origin { x: number; y: number; }
+interface Rest { x: number; y: number; at: number; }
+interface Book { hidden?: Rest; shown?: Rest; }
 
 interface Aspect { value: number; pending?: number; timer?: ReturnType<typeof setTimeout>; }
 interface CoordsSource { coords: any; seenAt: number; outer?: boolean; name?: string; keys?: string; onSize?: boolean; streamId?: string; layout?: string; }
@@ -38,7 +40,9 @@ interface Shared {
     touched: Set<object>;
     copies: number;
     owner: number;
-    origins?: Map<string, NativeOrigin>;
+    origins?: Map<string, any>;
+    books?: Map<string, Book>;
+    shifts?: Map<string, Origin>;
     originPolicy?: string;
     participantOrder?: Map<string, number>;
     tileCandidates?: Map<string, Map<object, Tile>>;
@@ -77,10 +81,11 @@ let burstUntil = 0;
 let gridW: { ww: number; w: number; } | null = null;
 let held = 0;
 let fullscreen = false;
-let origin: NativeOrigin | null = null;
+let origin: Origin | null = null;
 let moved = 0;
 let layoutWrites = 0;
 let targetChanges = 0;
+let lastAnyWrite = 0;
 
 const SETTLE_MS = 1000;
 const DEFAULT_ORDER: TileKind[] = ["stream", "them", "me"];
@@ -112,6 +117,7 @@ function write(sv: any, next: any, r: Rect) {
         written.set(sv, list);
     }
     lastWrite.set(sv, Date.now());
+    lastAnyWrite = Date.now();
     writeCoords(sv, next);
 }
 
@@ -618,43 +624,49 @@ interface Frame { origin: { x: number; y: number; }; parent: string; hidden: boo
 let frame: Frame | null = null;
 let viewport = "";
 let layoutChannel = "";
-const origins = shared.origins ??= new Map<string, NativeOrigin>();
-if (shared.originPolicy !== "rest") origins.clear();
-shared.originPolicy = "rest";
-let lastOriginAt = 0;
-let nativeAllocation: { viewport: string; at: number; coords: Map<object, Rect>; } | null = null;
-let originFrom = "native";
+let viewportAt = 0;
+shared.origins?.clear();
+const books = shared.books ??= new Map<string, Book>();
+const shifts = shared.shifts ??= new Map<string, Origin>();
+if (shared.originPolicy !== "container") {
+    books.clear();
+    shifts.clear();
+}
+shared.originPolicy = "container";
+let originFrom = "waiting";
 const frameLog: string[] = [];
 let frameNote = "";
 
 const statusBar = () => (typeof StatusBar?.currentHeight === "number" ? StatusBar.currentHeight : 24);
 
+const bookKey = () => `${layoutChannel}|${viewport}|${fullscreen ? "full" : "grid"}`;
+const shiftKey = () => `${viewport}|${fullscreen ? "full" : "grid"}`;
+
 function syncViewport() {
     const key = viewportKey();
     const channel = String(SelectedChannelStore?.getVoiceChannelId?.() ?? "");
     if (key === viewport && channel === layoutChannel) return;
-    const inherited = origins.get(`${channel}|${key}`);
-    if (!inherited && touched.size) releaseForCalibration();
     viewport = key;
     layoutChannel = channel;
+    viewportAt = Date.now();
     frame = null;
-    origin = inherited ?? null;
-    originFrom = inherited ? "cached native" : "native";
-    lastOriginAt = 0;
-    nativeAllocation = null;
+    run = null;
     gridW = null;
+    toolbarLast = null;
+    toolbarRest = null;
     resetTileMeasurements();
+    origin = null;
+    originFrom = "waiting";
+    resolveOrigin();
+    if (!origin && touched.size) releaseForCalibration();
     frameNote = "screen changed";
 }
 
-interface Pending { x: number; y: number; since: number; samples: number; }
-let pendingOrigin: Pending | null = null;
-const originMoves: number[] = [];
-let holdUntil = 0;
-let holds = 0;
+let run: { x: number; y: number; since: number; count: number; shown: boolean; validated: boolean; } | null = null;
 let follows = 0;
-let lastCandidate: { x: number; y: number; at: number; } | null = null;
-let lastBox: { x: number; y: number; width: number; height: number; wantX: number; wantY: number; } | null = null;
+let samplesUsed = 0;
+let samplesSkipped = 0;
+let lastSample: (ContainerSample & { shown: boolean; }) | null = null;
 
 function logFrame(line: string) {
     frameLog.push(`${new Date().toISOString().slice(17, 23)} ${line}`);
@@ -665,9 +677,6 @@ let controlsPresent = false;
 let stateSig = "";
 let stateAt = 0;
 let chromeAt = 0;
-let quiet = 0;
-
-const originKey = (channel = layoutChannel, key = viewport) => `${channel}|${key}`;
 
 function stateOf(): string {
     let st: any;
@@ -676,7 +685,7 @@ function stateOf(): string {
     } catch { }
     const vis = st?.voiceCallOverlayLayoutStates;
     const shown = vis && typeof vis === "object" ? Object.values(vis).map((v: any) => (v?.isVisible ? 1 : 0)).join("") : "";
-    return `${st?.focus ? 1 : 0}${shown}${st?.voiceChatDrawerState ?? ""}${controlsPresent ? "c" : ""}`;
+    return `${st?.focus ? 1 : 0}${shown}${st?.voiceChatDrawerState ?? ""}`;
 }
 
 function refreshState() {
@@ -684,105 +693,77 @@ function refreshState() {
     if (next === stateSig) return;
     stateSig = next;
     stateAt = Date.now();
-    pendingOrigin = null;
+    run = null;
 }
 
 export const noteControls = safe("split controls", (present: boolean) => {
-    if (controlsPresent === present) return;
     controlsPresent = present;
-    refreshState();
 });
 
-const settling = (now: number) => now - chromeAt < 1500 || now - stateAt < 1500 || chrome && now - chromeAt < 8000;
-
-function trackOrigin(win: { width: number; height: number; }, list: Tile[]) {
-    const now = Date.now();
-    const p = measured.parent;
-    if (!p || p.viewport !== viewport || p.at === lastOriginAt || now - p.at > 700 || !isCoords(p.coords) || !near(readCoords(p.sv) ?? {}, p.coords)) return;
-    lastOriginAt = p.at;
-    const owned = active && touched.has(p.sv);
-    const target = targets.get(p.sv);
-    if (owned) {
-        if (!target || !near(p.coords, target) || now - (lastWrite.get(p.sv) ?? 0) < 300) return;
-        if (settling(now)) {
-            if (pendingOrigin) quiet++;
-            pendingOrigin = null;
-            return;
-        }
-    } else if (active && origin) return;
-    const candidate = {
-        x: p.x - p.coords.x - (p.coords.width - p.width) / 2,
-        y: p.y - p.coords.y - (p.coords.height - p.height) / 2,
-    };
-    if (!Number.isFinite(candidate.x) || !Number.isFinite(candidate.y) || candidate.x < -win.width / 4 || candidate.y < -win.height / 4 || candidate.x > win.width / 2 || candidate.y > win.height / 2) return;
-    lastCandidate = { ...candidate, at: now };
-    if (origin) lastBox = { x: p.x, y: p.y, width: p.width, height: p.height, wantX: origin.x + p.coords.x + (p.coords.width - p.width) / 2, wantY: origin.y + p.coords.y + (p.coords.height - p.height) / 2 };
-    const next = { x: Math.round(candidate.x * 2) / 2, y: Math.round(candidate.y * 2) / 2 };
-
-    if (!owned) {
-        const prev = origin;
-        origin = { ...next, left: prev?.left, right: prev?.right };
-        if (win.width > win.height && nativeAllocation?.viewport === p.viewport && nativeAllocation.at === p.at && nativeAllocation.coords.size === list.length && list.length === (callParts() ?? []).filter(p => p.video).length && list.length > 0 && list.every(t => hasTileProbe(t.coords) && !targets.has(t.coords) && !touched.has(t.coords) && near(readCoords(t.coords) ?? {}, nativeAllocation!.coords.get(t.coords) ?? { x: NaN, y: NaN, width: NaN, height: NaN }))) {
-            const native = list.map(t => readCoords(t.coords));
-            if (native.every(c => c && [c.x, c.y, c.width, c.height].every(Number.isFinite) && c.x >= 0 && c.width > 0 && c.height > 0)) {
-                const left = Math.min(...native.map(c => c.x));
-                const right = Math.max(...native.map(c => c.x + c.width));
-                if (right - left > win.width / 2 && origin.x + right <= win.width + 0.5) {
-                    origin.left = origin.x + left;
-                    origin.right = origin.x + right;
-                }
-            }
-        }
-        originFrom = "discord";
-        origins.set(originKey(), origin);
-        if (origins.size > 24) origins.delete(origins.keys().next().value!);
-        if (!prev || Math.abs(prev.x - origin.x) >= 2 || Math.abs(prev.y - origin.y) >= 2) logFrame(`discord origin ${viewport} ${origin.x},${origin.y}`);
-        return;
-    }
-
-    if (!origin || Math.abs(origin.x - next.x) < 2 && Math.abs(origin.y - next.y) < 2) {
-        pendingOrigin = null;
-        return;
-    }
-    if (!pendingOrigin || Math.abs(pendingOrigin.x - next.x) > 1.5 || Math.abs(pendingOrigin.y - next.y) > 1.5) {
-        pendingOrigin = { ...next, since: now, samples: 1 };
-        return;
-    }
-    pendingOrigin.samples++;
-    if (pendingOrigin.samples < 3 || now - pendingOrigin.since < 600 || now < holdUntil) return;
-    while (originMoves.length && now - originMoves[0] > 6000) originMoves.shift();
-    if (originMoves.length >= 6) {
-        holdUntil = now + 6000;
-        holds++;
-        originMoves.length = 0;
-        pendingOrigin = null;
-        logFrame(`origin keeps moving, holding ${origin.x},${origin.y}`);
-        return;
-    }
-    originMoves.push(now);
+function resolveOrigin() {
+    const book = books.get(bookKey());
+    const shift = shifts.get(shiftKey());
+    const next = book?.hidden ? { x: book.hidden.x, y: book.hidden.y, from: "rest with controls hidden" }
+        : book?.shown && shift ? { x: book.shown.x - shift.x, y: book.shown.y - shift.y, from: "rest with controls shown, known shift" }
+            : book?.shown ? { x: book.shown.x, y: book.shown.y, from: "rest with controls shown" } : null;
+    if (!next) return;
+    originFrom = next.from;
+    if (origin && Math.abs(origin.x - next.x) < 1 && Math.abs(origin.y - next.y) < 1) return;
+    logFrame(`origin ${origin ? `${origin.x},${origin.y}` : "none"} -> ${next.x},${next.y} ${viewport}`);
+    origin = { x: next.x, y: next.y };
     follows++;
-    logFrame(`followed ${origin.x},${origin.y} -> ${next.x},${next.y}`);
-    origin = { ...next, left: origin.left, right: origin.right };
-    originFrom = "followed";
-    origins.set(originKey(), origin);
-    if (origins.size > 24) origins.delete(origins.keys().next().value!);
-    pendingOrigin = null;
-    scheduleApply();
+    if (active) scheduleApply();
 }
 
-function updateFrame(win: { width: number; height: number; }, list: Tile[]) {
+const onContainer = safe("split container sample", (s: ContainerSample) => {
+    if (s.viewport !== viewport) return;
+    const now = Date.now();
+    lastSample = { ...s, shown: chrome };
+    if (now - chromeAt < 900 || now - stateAt < 900 || now - viewportAt < 600) {
+        run = null;
+        samplesSkipped++;
+        return;
+    }
+    if (!s.validated && now - lastAnyWrite < 1200) {
+        run = null;
+        return;
+    }
+    if (run && run.shown === chrome && run.validated === s.validated && Math.abs(run.x - s.x) <= 1.5 && Math.abs(run.y - s.y) <= 1.5) run.count++;
+    else run = { x: s.x, y: s.y, since: now, count: 1, shown: chrome, validated: s.validated };
+    if (run.count < (s.validated ? 2 : 4) || now - run.since < (s.validated ? 300 : 900)) return;
+    samplesUsed++;
+    const rest = { x: Math.round(run.x * 2) / 2, y: Math.round(run.y * 2) / 2, at: now };
+    const key = bookKey();
+    const book = books.get(key) ?? {};
+    const slot = run.shown ? "shown" : "hidden";
+    const prev = book[slot];
+    if (prev && Math.abs(prev.x - rest.x) < 1 && Math.abs(prev.y - rest.y) < 1) {
+        prev.at = now;
+    } else {
+        book[slot] = rest;
+        books.delete(key);
+        books.set(key, book);
+        if (books.size > 24) books.delete(books.keys().next().value!);
+        logFrame(`${slot} rest ${viewport} ${rest.x},${rest.y}${s.validated ? "" : " (guessed)"}`);
+    }
+    if (book.hidden && book.shown) shifts.set(shiftKey(), { x: book.shown.x - book.hidden.x, y: book.shown.y - book.hidden.y });
+    resolveOrigin();
+});
+
+function updateFrame(win: { width: number; height: number; }) {
     refreshState();
-    trackOrigin(win, list);
     const land = win.width > win.height;
     const top = fullscreen ? (land ? 8 : statusBar() + 6) : statusBar() + (land ? 8 : 40);
     const bottom = fullscreen ? win.height - (land ? 8 : 56) : win.height - (land ? 90 : 136);
     frame = origin ? { origin, parent: originFrom, hidden: !chrome, top, bottom: Math.max(top + 1, Math.min(win.height, bottom)) } : null;
-    frameNote = origin ? (Date.now() < holdUntil ? "holding" : "tracking") : "waiting for discord's layout";
+    frameNote = origin ? "tracking" : "waiting for discord's layout";
 }
 
 export function setTilesFullscreen(v: boolean) {
     if (fullscreen === v) return;
     fullscreen = v;
+    run = null;
+    resolveOrigin();
     if (active) scheduleApply();
 }
 
@@ -793,12 +774,17 @@ let safeAreaFrom = "not seen";
 export function noteSafeArea(v: any) {
     const n = (k: string) => (typeof v?.[k] === "number" && Number.isFinite(v[k]) ? Math.max(0, v[k]) : 0);
     const next = { top: n("top"), right: n("right"), bottom: n("bottom"), left: n("left") };
-    if (safeAreaFrom !== "not seen" && next.top === safeArea.top && next.right === safeArea.right && next.bottom === safeArea.bottom && next.left === safeArea.left) return;
+    const at = viewportKey();
+    if (safeAreaFrom === `discord ${at}` && next.top === safeArea.top && next.right === safeArea.right && next.bottom === safeArea.bottom && next.left === safeArea.left) return;
+    const changed = next.top !== safeArea.top || next.right !== safeArea.right || next.bottom !== safeArea.bottom || next.left !== safeArea.left;
     safeArea = next;
-    safeAreaFrom = "discord";
+    safeAreaFrom = `discord ${at}`;
+    if (changed && active) scheduleApply();
 }
 
-export const safeAreaNote = () => `${safeAreaFrom} ${Math.round(safeArea.top)},${Math.round(safeArea.right)},${Math.round(safeArea.bottom)},${Math.round(safeArea.left)}`;
+onInsets(noteSafeArea);
+
+export const safeAreaNote = () => `${safeAreaFrom}: ${Math.round(safeArea.top)},${Math.round(safeArea.right)},${Math.round(safeArea.bottom)},${Math.round(safeArea.left)}`;
 
 function computeRects(list: Tile[]): Map<string, Rect> {
     const win = Dimensions.get("window");
@@ -833,18 +819,9 @@ function noteMove(t: Tile, cur: any, now: number, target: Rect) {
     if (moves.length > 8) moves.shift();
 }
 
-function preferredProbe(list: Tile[]) {
-    const mounted = list.filter(t => hasTileProbe(t.coords));
-    return mounted.find(t => [...coordsById.values()].some(source => source.outer && source.coords === t.coords)) ?? mounted.find(t => t.kind === "stream") ?? mounted[0];
-}
-
 function measureTiles(list: Tile[]) {
-    const probe = preferredProbe(list);
-    const snapshot = (!active || !origin) && list.every(t => !targets.has(t.coords) && !touched.has(t.coords)) ? new Map(list.map(t => [t.coords, { ...readCoords(t.coords) }])) : null;
-    measureAll(readCoords, probe?.coords, probe ? aspectOf(probe) : undefined, () => {
-        if (snapshot && measured.parent) nativeAllocation = { viewport: measured.parent.viewport, at: measured.parent.at, coords: snapshot };
-        if (active && !origin) scheduleApply();
-    });
+    measureToolbarNow();
+    sampleContainer(list.map(t => t.coords), readCoords, onContainer);
 }
 
 function applyLayout() {
@@ -853,7 +830,7 @@ function applyLayout() {
     const list = orderedTiles();
     measureTiles(list);
     noteChrome();
-    updateFrame(Dimensions.get("window"), list);
+    updateFrame(Dimensions.get("window"));
     if (!list.length) {
         if (touched.size) restoreAll();
         return;
@@ -954,11 +931,14 @@ function setChrome(v: boolean) {
     if (chrome === v) return;
     chrome = v;
     chromeAt = Date.now();
-    setTimeout(() => chromeListeners.forEach(l => {
+    run = null;
+    setTimeout(safe("split chrome listeners", () => chromeListeners.forEach(l => {
         try {
             l();
-        } catch { }
-    }), 0);
+        } catch (e) {
+            caught("split chrome listener", e);
+        }
+    })), 0);
 }
 
 const CALL_STORE = "modules/video_calls/native/ChannelCallStore.tsx";
@@ -970,15 +950,23 @@ let seenHidden: boolean | undefined;
 let mismatch = 0;
 let chromeFrom = "measuring";
 
+let callStoreId: string | null | undefined;
+let callStoreLook = 0;
+
 function callStore(): any {
     const mods: any = (window as any).modules ?? {};
-    for (const id of Object.keys(mods)) {
-        const m = mods[id];
-        if (m?.__filePath !== CALL_STORE) continue;
-        const st = m.isInitialized ? m.publicModule?.exports?.useChannelCallStore : undefined;
-        return st && typeof st.getState === "function" && typeof st.subscribe === "function" ? st : null;
+    if (callStoreId === undefined || callStoreId === null && Date.now() - callStoreLook > 10_000) {
+        callStoreId = null;
+        callStoreLook = Date.now();
+        for (const id of Object.keys(mods)) {
+            if (mods[id]?.__filePath !== CALL_STORE) continue;
+            callStoreId = id;
+            break;
+        }
     }
-    return null;
+    const m = callStoreId != null ? mods[callStoreId] : null;
+    const st = m?.isInitialized ? m.publicModule?.exports?.useChannelCallStore : undefined;
+    return st && typeof st.getState === "function" && typeof st.subscribe === "function" ? st : null;
 }
 
 const trusted = () => typeof splitViewSettings.focusWhenShown === "boolean";
@@ -1020,22 +1008,45 @@ function fromMeasure(shown: boolean) {
     }
 }
 
+let toolbarLast: { y: number; at: number; } | null = null;
+let toolbarRest: number | null = null;
+let toolbarMove = "";
+let slides = 0;
+
 function noteChrome() {
     if (!hasToolbarRef() && toolbarKnown()) {
+        toolbarMove = "gone";
         fromMeasure(false);
         return;
     }
     const tb = measured.toolbar;
-    if (!tb || tb.viewport !== viewportKey() || Date.now() - tb.at > 2000) return;
-    fromMeasure(tb.y < Dimensions.get("window").height - 4);
+    if (!tb || tb.viewport !== viewportKey() || Date.now() - tb.at > 2000 || toolbarLast?.at === tb.at) return;
+    const prev = toolbarLast;
+    toolbarLast = { y: tb.y, at: tb.at };
+    const visible = tb.y < Dimensions.get("window").height - 4;
+    if (prev && visible && Math.abs(tb.y - prev.y) <= 0.5) toolbarRest = Math.max(toolbarRest ?? tb.y, tb.y);
+    if (prev && visible && tb.y > prev.y + 2 && (toolbarRest == null || prev.y >= toolbarRest - 2)) {
+        if (chrome) slides++;
+        toolbarMove = "sliding away";
+        fromMeasure(false);
+        return;
+    }
+    if (prev && tb.y < prev.y - 2) {
+        if (!chrome) slides++;
+        toolbarMove = "sliding in";
+        fromMeasure(true);
+        return;
+    }
+    toolbarMove = visible ? "still" : "off screen";
+    fromMeasure(visible);
 }
 
-export const chromeDebug = () => `controls: ${chrome ? "shown" : "hidden"} (from ${chromeFrom}), discord focus ${focusVal ?? "?"}, shown when focus ${splitViewSettings.focusWhenShown ?? "not learned yet"}`;
+export const chromeDebug = () => `controls: ${chrome ? "shown" : "hidden"} (from ${chromeFrom}, toolbar ${toolbarMove || "not measured"}${toolbarLast ? ` at y ${Math.round(toolbarLast.y)}` : ""}${toolbarRest != null ? `, rests at ${Math.round(toolbarRest)}` : ""}, caught ${slides} slides early), discord focus ${focusVal ?? "?"}, shown when focus ${splitViewSettings.focusWhenShown ?? "not learned yet"}`;
 
 export const chromeShown = () => chrome;
 
 let watchers = 0;
-let watchTimer: ReturnType<typeof setInterval> | null = null;
+let watchTimer: ReturnType<typeof setTimeout> | null = null;
 
 const checkChrome = safe("split chrome", () => {
     if (!storeOff) {
@@ -1046,10 +1057,14 @@ const checkChrome = safe("split chrome", () => {
         }
     }
     if (active || AppState.currentState !== "active") return;
+    if (!hasToolbarRef() && !anyTileProbes()) {
+        if (toolbarKnown()) fromMeasure(false);
+        return;
+    }
     syncViewport();
     const list = orderedTiles();
     measureTiles(list);
-    updateFrame(Dimensions.get("window"), list);
+    updateFrame(Dimensions.get("window"));
     if (!hasToolbarRef()) {
         if (toolbarKnown()) fromMeasure(false);
         return;
@@ -1057,14 +1072,21 @@ const checkChrome = safe("split chrome", () => {
     noteChrome();
 });
 
+function watchLoop() {
+    watchTimer = null;
+    if (!watchers) return;
+    checkChrome();
+    const busy = !active && AppState.currentState === "active" && (hasToolbarRef() || anyTileProbes());
+    watchTimer = setTimeout(safe("split chrome loop", watchLoop), busy ? 100 : 400);
+}
+
 export function watchChrome(): () => void {
     watchers++;
-    if (!watchTimer) watchTimer = setInterval(checkChrome, 300);
-    checkChrome();
+    if (!watchTimer) watchLoop();
     return () => {
         watchers = Math.max(0, watchers - 1);
         if (!watchers && watchTimer) {
-            clearInterval(watchTimer);
+            clearTimeout(watchTimer);
             watchTimer = null;
         }
         if (!watchers && storeOff) {
@@ -1086,7 +1108,7 @@ export function setTilesActive(v: boolean, handoff = false) {
     active = v;
     if (v) {
         shared.owner = copy;
-        origin = origins.get(originKey(String(SelectedChannelStore?.getVoiceChannelId?.() ?? ""), viewportKey())) ?? origin;
+        resolveOrigin();
         burstUntil = Date.now() + 3000;
         if (!pollTimer) poll();
     } else {
@@ -1131,15 +1153,19 @@ export function tilesDebug(): string[] {
     return [
         `copy ${copy} of ${shared.copies}, owner ${shared.owner}, ${hotStatus.source} ${hotStatus.revision.slice(0, 7)}`,
         `window: ${Math.round(Dimensions.get("window").width)}x${Math.round(Dimensions.get("window").height)}, tiles: ${list.length} (registered ${tiles.size}), call videos: ${(callParts() ?? []).filter(p => p.video).map(p => p.streamId ?? "preview").join(",") || "none"}, camera off: ${voice.length}`,
-        `mode: ${fullscreen ? "full screen" : "grid"}, ${frame ? `area ${Math.round(frame.origin.x)},${Math.round(frame.origin.y)} (${frame.parent}), controls ${frame.hidden ? "hidden" : "shown"}, fit ${Math.round(frame.top)}-${Math.round(frame.bottom)}` : "area not measured"}${frameNote ? ` (${frameNote})` : ""}${measured.toolbar ? `, toolbar y ${Math.round(measured.toolbar.y)}` : ""}`,
+        `mode: ${fullscreen ? "full screen" : "grid"}, ${frame ? `area ${Math.round(frame.origin.x)},${Math.round(frame.origin.y)} (${frame.parent}), controls ${frame.hidden ? "hidden" : "shown"}, fit ${Math.round(frame.top)}-${Math.round(frame.bottom)}` : "area not measured"}${frameNote ? ` (${frameNote})` : ""}${measured.toolbar ? `, toolbar y ${Math.round(measured.toolbar.y)}` : ""}, safe area ${safeAreaNote()}`,
         `held: ${held}, moved: ${moved}, guarded: ${guards.size}, touched: ${touched.size}, grid: ${gridW ? `${Math.round(gridW.w)}/${gridW.ww}` : "?"}`,
         `layout writes: ${layoutWrites}, target changes: ${targetChanges}, native resets: ${moved}`,
-        probeDebug(),
+        ...probeDebug(),
         `coordinate sources: ${[...coordsCandidates.entries()].slice(0, 16).map(([id, candidates]) => `${id}=${[...candidates.values()].slice(0, 4).map(source => `${source.outer ? "frame" : "renderer"}:${source.name ?? "unnamed"}${source.streamId ? ` sid${source.streamId}` : ""}${source.onSize ? " size callback" : ""}${hasTileProbe(source.coords) ? " mounted" : ""} ${fmt(readCoords(source.coords))} [${source.keys ?? ""}] layout=${source.layout ?? "unknown"}`).join(" | ")}`).join("; ") || "none"}`,
         `frames: equal 16:9, outer participants ${list.filter(t => [...coordsById.values()].some(source => source.outer && source.coords === t.coords)).length}, avatar sources ${voice.length}`,
-        `native packing: ${origin?.left != null && origin.right != null ? `${Math.round(origin.left)}-${Math.round(origin.right)}` : "not established"}`,
-        `origin: ${origin ? `${origin.x},${origin.y} from ${originFrom}` : "none"}, state ${stateSig || "?"}, followed ${follows}, skipped while settling ${quiet}, holds ${holds}${Date.now() < holdUntil ? " (holding now)" : ""}${pendingOrigin ? `, checking ${pendingOrigin.x},${pendingOrigin.y} (${pendingOrigin.samples})` : ""}${lastCandidate ? `, last seen ${Math.round(lastCandidate.x)},${Math.round(lastCandidate.y)} ${Math.round((Date.now() - lastCandidate.at) / 1000)}s ago` : ""}`,
-        `measured tile: ${lastBox ? `at ${Math.round(lastBox.x)},${Math.round(lastBox.y)} ${Math.round(lastBox.width)}x${Math.round(lastBox.height)}, wanted ${Math.round(lastBox.wantX)},${Math.round(lastBox.wantY)}` : "not yet"}${Dimensions.get("window").width > Dimensions.get("window").height ? `, landscape main ${list.find(t => t.key === stageMain)?.kind ?? "none"}` : ""}`,
+        `origin: ${origin ? `${origin.x},${origin.y} from ${originFrom}` : "none"}, state ${stateSig || "?"}, changed ${follows}x, samples used ${samplesUsed}, skipped while moving ${samplesSkipped}${run ? `, checking ${Math.round(run.x)},${Math.round(run.y)} (${run.count})` : ""}`,
+        `rests here: ${(() => {
+            const b = books.get(bookKey());
+            const sh = shifts.get(shiftKey());
+            return `${b?.hidden ? `hidden ${b.hidden.x},${b.hidden.y}` : "hidden ?"}, ${b?.shown ? `shown ${b.shown.x},${b.shown.y}` : "shown ?"}${sh ? `, shift ${sh.x},${sh.y}` : ""}`;
+        })()}, last sample ${lastSample ? `${Math.round(lastSample.x)},${Math.round(lastSample.y)} ${lastSample.validated ? "exact" : "guessed"} with controls ${lastSample.shown ? "shown" : "hidden"} ${Math.round((Date.now() - lastSample.at) / 1000)}s ago` : "none"}, discord controls ${controlsPresent ? "seen" : "not seen"}`,
+        ...(Dimensions.get("window").width > Dimensions.get("window").height ? [`landscape main: ${list.find(t => t.key === stageMain)?.kind ?? "none"}`] : []),
         ...(moves.length ? ["last moves:", ...moves.map(m => `  ${m}`)] : []),
         ...(frameLog.length ? ["area changes:", ...frameLog.map(m => `  ${m}`)] : []),
         `order setting: ${currentOrder().join(" > ")}`,
