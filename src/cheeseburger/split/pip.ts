@@ -467,6 +467,14 @@ function refresh() {
     } catch { }
 }
 
+export function pipChoices(): { id: string; label: string; }[] {
+    const me = myId();
+    return allParts().filter(x => !isMine(x, me) && hasPipStreamId(x) && hasVideo(x)).map(x => {
+        const name = String(x.userNick ?? x.user?.globalName ?? x.user?.username ?? "someone");
+        return { id: String(x.id), label: isStreamPart(x) ? `${name}'s screen` : `${name}'s camera` };
+    });
+}
+
 export function pinnedPip(): string | null {
     return pinned;
 }

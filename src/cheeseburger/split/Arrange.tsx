@@ -7,6 +7,7 @@ import { Animated, Text, View } from "react-native";
 import { safe } from "../crash";
 import { isLandscapeLocked, onRotateChange, toggleLandscape } from "../rotate/orientation";
 import { useCheeseburger } from "../storage";
+import { onPinChange, pinnedPip, pinPip, pipChoices } from "./pip";
 import { useSplitViewSettings } from "./storage";
 import { currentOrder, moveKind, moveTo, TileKind } from "./tiles";
 
@@ -164,6 +165,24 @@ export function ArrangeList() {
     );
 }
 
+function PipList() {
+    const [, force] = React.useReducer((n: number) => n + 1, 0);
+    React.useEffect(() => onPinChange(force), []);
+    const choices = pipChoices();
+    const pinned = pinnedPip();
+    const check = firstAsset("CheckmarkLargeIcon", "CheckmarkSmallIcon", "CheckIcon", "ic_check");
+    const mark = (on: boolean) => on ? (check !== undefined ? <TableRow.Icon source={check} /> : <TableRow.TrailingText text="on" />) : undefined;
+    const auto = !pinned || !choices.some(c => c.id === pinned);
+    return (
+        <TableRowGroup title="PiP shows">
+            <TableRow label="auto" trailing={mark(auto)} onPress={safe("arrange pip auto", () => pinPip(null))} />
+            {choices.map(c => (
+                <TableRow key={c.id} label={c.label} trailing={mark(c.id === pinned)} onPress={safe("arrange pip pick", () => pinPip(c.id === pinned ? null : c.id))} />
+            ))}
+        </TableRowGroup>
+    );
+}
+
 export function ArrangeSheet() {
     const rotateOn = useCheeseburger(s => s.rotate);
     const [, force] = React.useReducer((n: number) => n + 1, 0);
@@ -174,6 +193,7 @@ export function ArrangeSheet() {
             <BottomSheetTitleHeader title="Arrange" />
             <View style={{ paddingVertical: 16, gap: 16 }}>
                 <ArrangeList />
+                <PipList />
                 {rotateOn && (
                     <TableRowGroup title="Screen">
                         <TableRow label={isLandscapeLocked() ? "Portrait" : "Landscape"} onPress={safe("arrange rotate", () => toggleLandscape())} />

@@ -108,6 +108,7 @@ Details for `split/`:
 - Real pitch, robot or echo effects aren't possible: Discord's Android engine has no audio processing the mod can reach.
 
 **Pin buttons (`split/PipPin.tsx`)**
+- The Arrange sheet (hold the split button) has a "PiP shows" list: auto, or one of the other people's screens or cameras (`pipChoices` in `pip.ts`). It sets the same pin as the tile pins.
 - Pins are drawn by Cheeseburger, not copied from Discord's controls. `tilePinFor` adds a `Pin` next to each tile's probe, only for other people with video.
 - A pin either fills a tile-sized host ("in tile", the stream card) or, when its host is Discord's whole tile container (camera tiles), sits at the tile's coords ("placed"). Placed pins are only used after measuring that the tile really sits at its coords inside that host (`verifyPlace`). One pin per person: "in tile" beats "placed".
 - Spot: bottom 8, right 8, clipped to the tile. It slides 52dp down and fades out when the controls hide, using Discord's transition length when its `layout` object exposes one.
