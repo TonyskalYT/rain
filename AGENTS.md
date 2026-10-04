@@ -108,11 +108,15 @@ Details for `split/`:
 - Real pitch, robot or echo effects aren't possible: Discord's Android engine has no audio processing the mod can reach.
 
 **Pin buttons (`split/PipPin.tsx`)**
-- `FloatingControls` is hooked through every module export that holds it. Its render output gets an `InlinePin` appended.
-- That hook is installed once per Discord session and kept across hot swaps (`globalThis.__cheeseburgerPinFc`). It relays to the current copy through `globalThis.__cheeseburgerPinControls`, so the patched export never changes identity. Unpatching on every swap could leave tiles on a dead proxy, with no pins until the call screen reopened.
+- `watchControls` (a jsx after-hook) spots Discord's maximize wrapper as it's created (Focus label, `icon`, `onPress`, absolute style) and returns it in a Fragment with an `InlinePin` right after it. Nothing patches `FloatingControls` any more: patching its module export only worked when the patch landed before Discord grabbed the component, so pins came and went between sessions.
 - The pin is a copy of Discord's maximize element inside a full-size `scaleY: -1` container. That mirrors its spot (top 8 to bottom 8) and its slide animation. The button inside is flipped back so the icon and bevel stay upright.
-- The pin lab: on every show or hide of the controls, it samples where maximize, the pin, X and the name pill sit for about 1.5s. It dumps the controls' tree and uploads `lab-latest.txt` to the debug repo (setting "Pin reports", 12 uploads per session max). Read it before changing pin code.
-- Older paths are still there as fallbacks: markers injected into Discord's maximize `Pressable` (for presence and its rect) and `TilePin` beside the video renderer (only used when the controls hook fails).
+- Markers injected into Discord's maximize `Pressable` still report whether the controls are up (`noteControls`). `TilePin` is off.
+- The pin lab only runs with the "Pin reports" setting (`labOn`, off by default). It samples where maximize, the pin, X and the name pill sit for about 1.5s and uploads `lab-latest.txt`.
+
+**Tile layout (`split/tiles.tsx`)**
+- Tiles are placed in screen space, converted with the origin of Discord's tile container. Discord slides that container about 24dp when the controls show or hide.
+- The origin is only followed when things are at rest: never within 1.5s of a controls or call-state change, and not while the controls are up (unless they've stayed up 8s). Correcting during the slide made tiles move, then snap back. The origin is kept per channel and screen size only.
+- Polling and measuring pause while Discord is in the background.
 
 ## Debugging workflow
 
@@ -122,7 +126,8 @@ The report goes to his private debug repo as `latest.txt`, plus a timestamped co
 Pin lab reports land in the same repo as `lab-latest.txt` and `lab/`, on their own during calls.
 He usually sends reports from the settings page, after the call screen is closed, so anything you need from the call screen has to be remembered until then.
 
-Read `latest.txt` before guessing. It includes versions, settings, the call, crashes, split, PiP, style, share, volume and rotate. When something is unclear, add a line to the relevant `*Debug()` function and ask him to send again.
+Read `latest.txt` before guessing. It includes versions, settings, the call, crashes, split, PiP, style, share, volume, voice and rotate.
+Unexpected closes are logged with what Sentry said about the last run, the JS heap at the last heartbeat, the mic and boost levels and the uptime. When something is unclear, add a line to the relevant `*Debug()` function and ask him to send again.
 
 ## Open items
 

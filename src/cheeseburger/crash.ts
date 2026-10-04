@@ -5,10 +5,13 @@ import { React } from "@metro/common";
 import { SelectedChannelStore } from "@metro/common/stores";
 import { AppState } from "react-native";
 
+import { voiceSettings } from "./voice/storage";
+import { volumeBoostSettings } from "./volume/storage";
+
 type Kind = "crash" | "error" | "caught" | "closed";
 
 interface Entry { at: number; kind: Kind; what: string; stack?: string; n?: number; }
-interface Session { started: number; beat: number; state: string; call?: boolean; rev: string; ended?: string; }
+interface Session { started: number; beat: number; state: string; call?: boolean; rev: string; ended?: string; heap?: number; peak?: number; gains?: string; }
 interface Saved { log: Entry[]; session?: Session; }
 
 const FILE = "rain/cheeseburger-crash.json";
@@ -270,7 +273,7 @@ async function restore(checked: boolean) {
         if (!current()) return;
         if (prev.state === "active" || prev.call || android) {
             const where = prev.state === "active" ? "open" : prev.call ? "in a call in the background" : "in the background";
-            add("closed", `closed while ${where}, no error caught${android ? " (Android reported a crash)" : ""}`, undefined, prev.beat);
+            add("closed", `closed while ${where}, no error caught (${context(prev, android)})`, undefined, prev.beat);
         }
     }
     ready = true;
@@ -287,12 +290,46 @@ function begin(checked: boolean) {
     });
 }
 
+function heapMb(): number | undefined {
+    try {
+        const stats = g.HermesInternal?.getInstrumentedStats?.();
+        const v = stats?.js_heapSize ?? stats?.js_allocatedBytes;
+        return typeof v === "number" && v > 0 ? Math.round(v / 1048576) : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+function gains(): string {
+    try {
+        const mic = Number(voiceSettings.mic);
+        const boosts = Object.values(volumeBoostSettings.boosted ?? {}).map(Number).filter(Number.isFinite);
+        return `mic ${Number.isFinite(mic) ? Math.round(mic) : 100}%, boost ${boosts.length ? Math.round(Math.max(...boosts)) : 0}%`;
+    } catch {
+        return "";
+    }
+}
+
 function touch(state?: string) {
     if (!session) return;
     if (state) session.state = state;
     session.beat = Date.now();
     session.call = inCall();
+    const heap = heapMb();
+    if (heap !== undefined) {
+        session.heap = heap;
+        session.peak = Math.max(session.peak ?? 0, heap);
+    }
+    session.gains = gains();
     void write();
+}
+
+function context(prev: Session, android: boolean | null): string {
+    const parts = [`sentry ${android === null ? "unknown" : android ? "crash" : "clean"}`];
+    if (typeof prev.heap === "number") parts.push(`heap ${prev.heap}mb (peak ${prev.peak ?? prev.heap}mb)`);
+    if (prev.gains) parts.push(prev.gains);
+    if (typeof prev.started === "number" && typeof prev.beat === "number") parts.push(`up ${Math.max(0, Math.round((prev.beat - prev.started) / 60000))}m`);
+    return parts.join(", ");
 }
 
 export function startCrashLog() {
@@ -382,8 +419,9 @@ export function useCrashSummary() {
 }
 
 export function crashDebug(): string[] {
+    const heap = heapMb();
     return [
-        `crash log, running since ${session ? when(session.started) : "?"}, cheeseburger ${hotStatus.source} ${hotStatus.revision.slice(0, 7)}`,
+        `crash log, running since ${session ? when(session.started) : "?"}, cheeseburger ${hotStatus.source} ${hotStatus.revision.slice(0, 7)}, heap ${heap ?? "?"}mb (peak ${Math.max(session?.peak ?? 0, heap ?? 0) || "?"}mb)`,
         ...(saved.log.length
             ? [...saved.log].reverse().flatMap(e => [`  ${label(e)}`, ...(e.stack ? [`    ${e.stack}`] : [])])
             : ["  nothing yet"]),

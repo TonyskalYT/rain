@@ -8,6 +8,7 @@ interface SplitViewSettings {
     smartPip: boolean;
     pipPins: boolean;
     pinLab: boolean;
+    labOn: boolean;
     focusWhenShown: boolean | null;
 }
 
@@ -22,5 +23,6 @@ export const {
     smartPip: true,
     pipPins: true,
     pinLab: true,
+    labOn: false,
     focusWhenShown: null,
 });

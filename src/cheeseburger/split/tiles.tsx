@@ -2,7 +2,7 @@ import { hotStatus } from "@api/hot/status";
 import { logger } from "@lib/utils/logger";
 import { findByStoreName } from "@metro";
 import { SelectedChannelStore, UserStore } from "@metro/common/stores";
-import { Dimensions, StatusBar } from "react-native";
+import { AppState, Dimensions, StatusBar } from "react-native";
 
 import { caught, safe } from "../crash";
 import { splitRects, stageRects } from "./geometry";
@@ -619,8 +619,8 @@ let frame: Frame | null = null;
 let viewport = "";
 let layoutChannel = "";
 const origins = shared.origins ??= new Map<string, NativeOrigin>();
-if (shared.originPolicy !== "state") origins.clear();
-shared.originPolicy = "state";
+if (shared.originPolicy !== "rest") origins.clear();
+shared.originPolicy = "rest";
 let lastOriginAt = 0;
 let nativeAllocation: { viewport: string; at: number; coords: Map<object, Rect>; } | null = null;
 let originFrom = "native";
@@ -633,7 +633,7 @@ function syncViewport() {
     const key = viewportKey();
     const channel = String(SelectedChannelStore?.getVoiceChannelId?.() ?? "");
     if (key === viewport && channel === layoutChannel) return;
-    const inherited = origins.get(`${channel}|${key}|${stateSig}`);
+    const inherited = origins.get(`${channel}|${key}`);
     if (!inherited && touched.size) releaseForCalibration();
     viewport = key;
     layoutChannel = channel;
@@ -663,9 +663,11 @@ function logFrame(line: string) {
 
 let controlsPresent = false;
 let stateSig = "";
-let remembered = 0;
+let stateAt = 0;
+let chromeAt = 0;
+let quiet = 0;
 
-const originKey = (channel = layoutChannel, key = viewport) => `${channel}|${key}|${stateSig}`;
+const originKey = (channel = layoutChannel, key = viewport) => `${channel}|${key}`;
 
 function stateOf(): string {
     let st: any;
@@ -677,26 +679,21 @@ function stateOf(): string {
     return `${st?.focus ? 1 : 0}${shown}${st?.voiceChatDrawerState ?? ""}${controlsPresent ? "c" : ""}`;
 }
 
-function refreshState(apply: boolean) {
+function refreshState() {
     const next = stateOf();
     if (next === stateSig) return;
     stateSig = next;
-    const known = origins.get(originKey());
-    if (!known || !active || !mine()) return;
-    if (origin && Math.abs(known.x - origin.x) < 2 && Math.abs(known.y - origin.y) < 2) return;
-    logFrame(`remembered ${known.x},${known.y} for ${stateSig}`);
-    origin = { x: known.x, y: known.y, left: origin?.left, right: origin?.right };
-    originFrom = "remembered";
+    stateAt = Date.now();
     pendingOrigin = null;
-    remembered++;
-    if (apply) safeApply();
 }
 
 export const noteControls = safe("split controls", (present: boolean) => {
     if (controlsPresent === present) return;
     controlsPresent = present;
-    refreshState(true);
+    refreshState();
 });
+
+const settling = (now: number) => now - chromeAt < 1500 || now - stateAt < 1500 || chrome && now - chromeAt < 8000;
 
 function trackOrigin(win: { width: number; height: number; }, list: Tile[]) {
     const now = Date.now();
@@ -707,6 +704,11 @@ function trackOrigin(win: { width: number; height: number; }, list: Tile[]) {
     const target = targets.get(p.sv);
     if (owned) {
         if (!target || !near(p.coords, target) || now - (lastWrite.get(p.sv) ?? 0) < 300) return;
+        if (settling(now)) {
+            if (pendingOrigin) quiet++;
+            pendingOrigin = null;
+            return;
+        }
     } else if (active && origin) return;
     const candidate = {
         x: p.x - p.coords.x - (p.coords.width - p.width) / 2,
@@ -747,7 +749,7 @@ function trackOrigin(win: { width: number; height: number; }, list: Tile[]) {
         return;
     }
     pendingOrigin.samples++;
-    if (pendingOrigin.samples < 2 || now - pendingOrigin.since < 250 || now < holdUntil) return;
+    if (pendingOrigin.samples < 3 || now - pendingOrigin.since < 600 || now < holdUntil) return;
     while (originMoves.length && now - originMoves[0] > 6000) originMoves.shift();
     if (originMoves.length >= 6) {
         holdUntil = now + 6000;
@@ -769,7 +771,7 @@ function trackOrigin(win: { width: number; height: number; }, list: Tile[]) {
 }
 
 function updateFrame(win: { width: number; height: number; }, list: Tile[]) {
-    refreshState(false);
+    refreshState();
     trackOrigin(win, list);
     const land = win.width > win.height;
     const top = fullscreen ? (land ? 8 : statusBar() + 6) : statusBar() + (land ? 8 : 40);
@@ -900,8 +902,9 @@ const safeApply = safe("split layout", applyLayout);
 function poll() {
     pollTimer = null;
     if (!active || !mine()) return;
-    safeApply();
-    pollTimer = setTimeout(safe("split poll", poll), 100);
+    const awake = AppState.currentState === "active";
+    if (awake) safeApply();
+    pollTimer = setTimeout(safe("split poll", poll), awake ? 100 : 1000);
 }
 
 export function kickTiles() {
@@ -950,6 +953,7 @@ const chromeListeners = new Set<() => void>();
 function setChrome(v: boolean) {
     if (chrome === v) return;
     chrome = v;
+    chromeAt = Date.now();
     setTimeout(() => chromeListeners.forEach(l => {
         try {
             l();
@@ -980,7 +984,7 @@ function callStore(): any {
 const trusted = () => typeof splitViewSettings.focusWhenShown === "boolean";
 
 const onCallStore = safe("split call store", (state: any) => {
-    refreshState(true);
+    refreshState();
     const f = state?.focus;
     if (typeof f !== "boolean" || f === focusVal) return;
     focusVal = f;
@@ -1041,7 +1045,7 @@ const checkChrome = safe("split chrome", () => {
             onCallStore(st.getState());
         }
     }
-    if (active) return;
+    if (active || AppState.currentState !== "active") return;
     syncViewport();
     const list = orderedTiles();
     measureTiles(list);
@@ -1134,7 +1138,7 @@ export function tilesDebug(): string[] {
         `coordinate sources: ${[...coordsCandidates.entries()].slice(0, 16).map(([id, candidates]) => `${id}=${[...candidates.values()].slice(0, 4).map(source => `${source.outer ? "frame" : "renderer"}:${source.name ?? "unnamed"}${source.streamId ? ` sid${source.streamId}` : ""}${source.onSize ? " size callback" : ""}${hasTileProbe(source.coords) ? " mounted" : ""} ${fmt(readCoords(source.coords))} [${source.keys ?? ""}] layout=${source.layout ?? "unknown"}`).join(" | ")}`).join("; ") || "none"}`,
         `frames: equal 16:9, outer participants ${list.filter(t => [...coordsById.values()].some(source => source.outer && source.coords === t.coords)).length}, avatar sources ${voice.length}`,
         `native packing: ${origin?.left != null && origin.right != null ? `${Math.round(origin.left)}-${Math.round(origin.right)}` : "not established"}`,
-        `origin: ${origin ? `${origin.x},${origin.y} from ${originFrom}` : "none"}, state ${stateSig || "?"}, remembered ${remembered} (${[...origins.entries()].filter(([k]) => k.startsWith(`${layoutChannel}|${viewport}|`)).map(([k, v]) => `${k.split("|")[2] || "-"}=${v.x},${v.y}`).join(" ")}), followed ${follows}, holds ${holds}${Date.now() < holdUntil ? " (holding now)" : ""}${pendingOrigin ? `, checking ${pendingOrigin.x},${pendingOrigin.y} (${pendingOrigin.samples})` : ""}${lastCandidate ? `, last seen ${Math.round(lastCandidate.x)},${Math.round(lastCandidate.y)} ${Math.round((Date.now() - lastCandidate.at) / 1000)}s ago` : ""}`,
+        `origin: ${origin ? `${origin.x},${origin.y} from ${originFrom}` : "none"}, state ${stateSig || "?"}, followed ${follows}, skipped while settling ${quiet}, holds ${holds}${Date.now() < holdUntil ? " (holding now)" : ""}${pendingOrigin ? `, checking ${pendingOrigin.x},${pendingOrigin.y} (${pendingOrigin.samples})` : ""}${lastCandidate ? `, last seen ${Math.round(lastCandidate.x)},${Math.round(lastCandidate.y)} ${Math.round((Date.now() - lastCandidate.at) / 1000)}s ago` : ""}`,
         `measured tile: ${lastBox ? `at ${Math.round(lastBox.x)},${Math.round(lastBox.y)} ${Math.round(lastBox.width)}x${Math.round(lastBox.height)}, wanted ${Math.round(lastBox.wantX)},${Math.round(lastBox.wantY)}` : "not yet"}${Dimensions.get("window").width > Dimensions.get("window").height ? `, landscape main ${list.find(t => t.key === stageMain)?.kind ?? "none"}` : ""}`,
         ...(moves.length ? ["last moves:", ...moves.map(m => `  ${m}`)] : []),
         ...(frameLog.length ? ["area changes:", ...frameLog.map(m => `  ${m}`)] : []),

@@ -1,5 +1,4 @@
 import { findAsset } from "@api/assets";
-import { after } from "@api/patcher";
 import { findByProps, findByStoreName } from "@metro";
 import { React } from "@metro/common";
 import { Animated as RNAnimated, Image, Pressable, StyleSheet, View } from "react-native";
@@ -349,7 +348,6 @@ function Marker({ button }: { button: any; }) {
             const props = rec.template?.props;
             inspect(rec);
             latest = rec;
-            patchControls(rec.chain);
             if (fresh || before !== rec.sig || props !== rec.template?.props) notifyNow();
         } catch (e) {
             caught("pip pin marker", e);
@@ -365,12 +363,25 @@ function Marker({ button }: { button: any; }) {
     return <View ref={ref} collapsable={false} pointerEvents="none" style={HIDDEN} onLayout={onLayout} />;
 }
 
+function isWrapper(type: any, props: any): boolean {
+    if (typeof type === "string" || props.icon == null || typeof props.onPress !== "function") return false;
+    const f = flat(props.style);
+    return f.position === "absolute" && (f.top != null || f.bottom != null) && (f.right != null || f.left != null);
+}
+
 export const watchControls = safe("pip pin controls", (args: any[], ret: any) => {
     if (!active || !ret || typeof ret !== "object" || isPipRender()) return;
     const props = ret.props;
     if (!props || props[MARK] || !focusLabel(props)) return;
     const name = nameOf(args[0]) || "anonymous";
     noteButton(`${name} ${placement(props.style)} keys=${Object.keys(props).slice(0, 12).join(",")}${typeof props.children === "function" ? " children=fn" : ""}`);
+    if (isWrapper(args[0], props)) {
+        if (splitViewSettings.pipPins === false) return;
+        siblings++;
+        pinNote = "next to discord's maximize";
+        const pin = React.createElement(Shell, { key: INLINE, part: "InlinePin", props: { owner: null, button: ret, path: [] } });
+        return React.createElement(React.Fragment, { key: ret.key ?? undefined }, ret, pin);
+    }
     const ch = props.children;
     if (!/Pressable|Touchable/i.test(name) || ch == null || typeof ch !== "object") return;
     if (Array.isArray(ch) && ch.some((c: any) => c?.key === MARKER)) return;
@@ -839,7 +850,7 @@ function participantNear(fiber: any): any {
     return null;
 }
 
-const isControls = (f: any) => !!f && (fcTypes.has(f.elementType) || fcTypes.has(f.type) || fcTypes.has(f.elementType?.type) || fcTypes.has(f.type?.type) || fcTypes.size > 0 && /FloatingControls/.test(nameOf(f.elementType ?? f.type)));
+const isControls = (f: any) => !!f && /FloatingControls/.test(nameOf(f.elementType ?? f.type));
 
 function controlsAbove(fiber: any): any {
     for (let f = fiber?.return, i = 0; f && i < 12; f = f.return, i++) if (isControls(f)) return f;
@@ -955,11 +966,11 @@ function elementLines(el: any, depth: number, out: string[]) {
 
 const labRuns: string[][] = [];
 let labTree: string[] = [];
-let labElements: string[] = [];
-let labElementsAt = 0;
+const labElements: string[] = [];
+const labElementsAt = 0;
 let labSeq = 0;
 const labListeners = new Set<() => void>();
-const labOn = () => active && splitViewSettings.pinLab !== false;
+const labOn = () => active && splitViewSettings.labOn === true;
 
 export function onLabReady(l: () => void) {
     labListeners.add(l);
@@ -1081,7 +1092,7 @@ function runLab(event: string, target: LabTarget) {
 
 export function labText(): string[] {
     return [
-        `pin lab: ${labSeq} events, ${FC.note}, reanimated ${reanimatedModule() ? "found" : "missing"}, flip ${unflipNotes.join("; ") || "nothing wrapped yet"}`,
+        `pin lab: ${labSeq} events, ${pinNote}, reanimated ${reanimatedModule() ? "found" : "missing"}, flip ${unflipNotes.join("; ") || "nothing wrapped yet"}`,
         ...labRuns.flat(),
         "controls tree (live):",
         ...(labTree.length ? labTree : ["  not captured yet"]),
@@ -1201,11 +1212,10 @@ function InlinePin({ owner, button, path }: InlineProps) {
     </View>;
 }
 
-interface FcState { types: Set<any>; unpatches: (() => unknown)[]; hooked: WeakSet<object>; count: number; note: string; }
-const FC: FcState = G.__cheeseburgerPinFc ??= { types: new Set<any>(), unpatches: [], hooked: new WeakSet<object>(), count: 0, note: "waiting for discord's controls" };
-const fcTypes = FC.types;
 const whyLog: string[] = [];
 const lastWhy = new WeakMap<InlineRec, string>();
+let siblings = 0;
+let pinNote = "waiting for discord's controls";
 
 function noteWhy(rec: InlineRec, why: string) {
     if (lastWhy.get(rec) === why) return;
@@ -1214,190 +1224,43 @@ function noteWhy(rec: InlineRec, why: string) {
     if (whyLog.length > 10) whyLog.shift();
 }
 
-let fcType: any = FC.count > 0 ? [...FC.types][0] ?? null : null;
-const relay = G.__cheeseburgerPinRelay ??= function (this: any, args: any[], ret: any) {
-    const f = G.__cheeseburgerPinControls;
-    if (typeof f !== "function") return undefined;
-    try {
-        return f.call(this, args, ret);
-    } catch {
-        return undefined;
-    }
-};
+const fcType: any = null;
 
-function findButton(tree: any): { button: any; path: any[]; } | null {
-    const walk = (el: any, path: any[], depth: number): { button: any; path: any[]; } | null => {
-        if (Array.isArray(el)) {
-            for (const child of el) {
-                const r = walk(child, path, depth);
-                if (r) return r;
-            }
-            return null;
-        }
-        if (!el || typeof el !== "object" || !("$$typeof" in el) || depth > 9) return null;
-        const p = el.props ?? {};
-        if (p[MARK] || el.key === INLINE) return null;
-        if (depth > 0 && focusLabel(p)) return { button: el, path };
-        if (p.children == null || typeof p.children !== "object") return null;
-        return walk(p.children, depth === 0 ? path : [...path, el], depth + 1);
-    };
-    return walk(tree, [], 0);
-}
-
-const addInline = safe("pip pin controls host", (args: any[], ret: any) => {
-    if (!active && !G.__cheeseburgerSwapping || !ret || typeof ret !== "object" || !("$$typeof" in ret) || isPipRender()) return;
-    const props = ret.props ?? {};
-    const ch = props.children;
-    if (typeof ch === "function") return;
-    const list = ch == null ? [] : Array.isArray(ch) ? ch : [ch];
-    if (list.some((c: any) => c?.key === INLINE)) return;
-    const found = findButton(ret);
-    if (labOn() && Date.now() - labElementsAt > 1500) {
-        labElementsAt = Date.now();
-        const out: string[] = [];
-        elementLines(ret, 1, out);
-        labElements = out;
-    }
-    const pin = React.createElement(Shell, { key: INLINE, part: "InlinePin", props: { owner: args?.[0], button: found?.button ?? null, path: found?.path ?? [] } });
-    return { ...ret, props: { ...props, children: [...list, pin] } };
-});
-
-const CONTROLS_PATH = /VoicePanelCardFloatingControls\.tsx$/;
-let controlsTimer: ReturnType<typeof setTimeout> | null = null;
-
-const triedTypes = new WeakSet<object>();
-
-function hookAllWith(type: any, where: string): number {
-    if (!type || typeof type !== "function" && typeof type !== "object") return 0;
-    let added = 0;
-    fcTypes.add(type);
-    if (typeof type === "object") {
-        const inner = type.type ?? type.render;
-        if (typeof inner === "function") fcTypes.add(inner);
-        if (!FC.hooked.has(type)) {
-            FC.hooked.add(type);
+function cleanOldHooks() {
+    const old = G.__cheeseburgerPinFc;
+    if (old && Array.isArray(old.unpatches)) {
+        for (const u of old.unpatches.splice(0)) {
             try {
-                if (typeof type.type === "function") {
-                    FC.unpatches.push(after("type", type, relay));
-                    fcTypes.add(type.type);
-                    added++;
-                } else if (typeof type.render === "function") {
-                    FC.unpatches.push(after("render", type, relay));
-                    fcTypes.add(type.render);
-                    added++;
-                }
-            } catch (e) {
-                caught("pip pin controls patch", e);
-            }
-        }
-    } else {
-        const mods: any = (window as any).modules ?? {};
-        for (const id of Object.keys(mods)) {
-            const m = mods[id];
-            if (!m?.isInitialized) continue;
-            const exp = m.publicModule?.exports;
-            if (!exp || typeof exp !== "object" && typeof exp !== "function") continue;
-            let keys: string[];
-            try {
-                keys = Object.keys(exp);
-            } catch {
-                continue;
-            }
-            for (const key of keys) {
-                let d: PropertyDescriptor | undefined;
-                try {
-                    d = Object.getOwnPropertyDescriptor(exp, key);
-                } catch {
-                    continue;
-                }
-                if (!d || !("value" in d) || d.value !== type || !d.writable && !d.configurable) continue;
-                try {
-                    FC.unpatches.push(after(key, exp, relay));
-                    fcTypes.add(exp[key]);
-                    added++;
-                } catch (e) {
-                    caught("pip pin controls patch", e);
-                }
-            }
+                u();
+            } catch { }
         }
     }
-    if (added) {
-        fcType = type;
-        FC.count += added;
-        FC.note = `hooked ${where} in ${FC.count} place${FC.count === 1 ? "" : "s"}`;
-    }
-    return added;
-}
-
-const hookControlsEarly = safe("pip pin controls early", (tries = 0) => {
-    controlsTimer = null;
-    if (!active || fcType) return;
-    const mods: any = (window as any).modules ?? {};
-    for (const id of Object.keys(mods)) {
-        const m = mods[id];
-        const path = String(m?.__filePath ?? "");
-        if (!CONTROLS_PATH.test(path) || !m.isInitialized) continue;
-        const v = m.publicModule?.exports?.default;
-        if (v && hookAllWith(v, path.split("/").pop()!)) return;
-    }
-    if (tries < 90) controlsTimer = setTimeout(() => hookControlsEarly(tries + 1), 2000);
-});
-
-function patchControls(chain: any[]) {
-    const f = chain.find(x => /FloatingControls/.test(nameOf(x.elementType ?? x.type)));
-    if (!f) {
-        if (!fcType) FC.note = `no controls component in ${chain.slice(0, 4).map(x => nameOf(x.elementType ?? x.type) || "anonymous").join(" < ")}`;
-        return;
-    }
-    const type = f.elementType ?? f.type;
-    if (fcTypes.has(type) || triedTypes.has(type)) return;
-    triedTypes.add(type);
-    if (!hookAllWith(type, nameOf(type) || "controls")) FC.note = `controls rendered by an unhooked copy (${nameOf(type)})`;
+    delete G.__cheeseburgerPinFc;
+    G.__cheeseburgerPinControls = null;
 }
 
 export function startPins() {
     active = true;
-    G.__cheeseburgerPinControls = addInline;
-    fcType = FC.count > 0 ? [...FC.types][0] ?? null : null;
-    hookControlsEarly(0);
-    setTimeout(safe("pip pin refresh", () => findByStoreName("ChannelRTCStore")?.emitChange?.()), 60);
+    cleanOldHooks();
     G.__cheeseburgerPinImpl = { TilePin: Pin, InlinePin, Marker };
     for (const bump of [...shells]) {
         try {
             bump();
         } catch { }
     }
+    setTimeout(safe("pip pin refresh", () => findByStoreName("ChannelRTCStore")?.emitChange?.()), 60);
 }
 
 export function stopPins() {
     active = false;
-    if (controlsTimer) clearTimeout(controlsTimer);
-    controlsTimer = null;
-    if (!G.__cheeseburgerSwapping) {
-        for (const u of FC.unpatches.splice(0)) {
-            try {
-                u();
-            } catch { }
-        }
-        fcTypes.clear();
-        FC.hooked = new WeakSet<object>();
-        FC.count = 0;
-        FC.note = "waiting for discord's controls";
-        G.__cheeseburgerPinControls = null;
-    }
-    fcType = null;
     owners.clear();
     markers.clear();
     latest = null;
     notifyNow();
 }
 
-export function tilePinFor(props: any): any {
-    if (!active || !props?.sharedCoords || isPipRender()) return null;
-    const participant = participantForPin(props);
-    if (!participant || participant.id == null || mineParticipant(participant)) return null;
-    const stream = participant.type === 0 || String(participant.id).startsWith("call:");
-    return React.createElement(Shell, { key: `cheeseburger-pin-${participant.id}`, part: "TilePin", props: { coords: props.sharedCoords, pid: String(participant.id), stream } });
+export function tilePinFor(_props: any): any {
+    return null;
 }
 
 export function pinControlsDebug(): string[] {
@@ -1405,7 +1268,7 @@ export function pinControlsDebug(): string[] {
     const rec = latest ?? [...markers][0] ?? null;
     return [
         `pins: inline mounts ${inlineMounts}, renders ${inlineRenders} (from render ${fromRender}, from markers ${fromMarker}), live ${[...inlines.values()].map(r => r.why).join(", ") || "none"}, clone errors ${cloneErrors}, reanimated ${A ? "found" : "missing"}`,
-        `controls hook: ${FC.note}, relay ${G.__cheeseburgerPinControls === addInline ? "this copy" : G.__cheeseburgerPinControls ? "old copy" : "off"}`,
+        `controls hook: ${pinNote}, next to maximize ${siblings}x`,
         `pin states: ${whyLog.join(" | ") || "none yet"}`,
         `flip: ${unflipNotes.join("; ") || "nothing wrapped yet"}`,
         `fallback layer: hosts ${hosts}, owners ${owners.size}, markers ${markers.size} (ever ${markersEver}, injected ${injected}), fibers ${fibersFound} found ${fibersMissing} missing, clone renders ${cloneRenders}, plain renders ${fallbackRenders}, safe area ${safeAreaNote()}`,

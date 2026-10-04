@@ -149,7 +149,7 @@ export default function Settings() {
                             />
                             <TableSwitchRow label="Smart PiP" subLabel="never shows you, sticks to streams" value={split.smartPip !== false} onValueChange={(v: boolean) => split.updateSettings({ smartPip: v })} />
                             <TableSwitchRow label="PiP pin buttons" subLabel="tap one on a video to lock the PiP to it" value={split.pipPins !== false} onValueChange={(v: boolean) => split.updateSettings({ pipPins: v })} />
-                            {split.pipPins !== false && <TableSwitchRow label="Pin reports" subLabel="sends pin checks to your debug repo during calls" value={split.pinLab !== false} onValueChange={(v: boolean) => split.updateSettings({ pinLab: v })} />}
+                            {split.pipPins !== false && <TableSwitchRow label="Pin reports" subLabel="sends pin checks to your debug repo during calls" value={split.labOn === true} onValueChange={(v: boolean) => split.updateSettings({ labOn: v })} />}
                         </>
                     )}
                     <TableSwitchRow
