@@ -5,7 +5,7 @@ import { Animated as RNAnimated, AppState, Easing, Image, Pressable, StyleSheet,
 
 import { caught, safe } from "../crash";
 import { accentColor } from "../style/colors";
-import { isPipRender, mineParticipant, onPinChange, participantForPin, pinnedPip, pinPip } from "./pip";
+import { isPipRender, mineParticipant, onPinChange, participantForFocus, participantForPin, pinnedPip, pinPip } from "./pip";
 import { tileHostNear } from "./probe";
 import { splitViewSettings, useSplitViewSettings } from "./storage";
 import { chromeShown, hasVideo, noteControls, noteSafeArea, onChrome, safeAreaNote } from "./tiles";
@@ -364,6 +364,56 @@ function Marker({ button }: { button: any; }) {
     return <View ref={ref} collapsable={false} pointerEvents="none" style={HIDDEN} onLayout={onLayout} />;
 }
 
+const handles: Map<string, { style: any; at: number; }> = G.__cheeseburgerPinHandles ??= new Map();
+let handleNotes = 0;
+
+function animatedStyle(style: any, depth = 0): boolean {
+    if (!style || typeof style !== "object" || depth > 4) return false;
+    if (Array.isArray(style)) return style.some(s => animatedStyle(s, depth + 1));
+    return !!style.viewDescriptors && !!style.initial;
+}
+
+function viewsOn(style: any, depth = 0): number | null {
+    if (!style || typeof style !== "object" || depth > 4) return null;
+    if (Array.isArray(style)) {
+        for (const s of style) {
+            const n = viewsOn(s, depth + 1);
+            if (n != null) return n;
+        }
+        return null;
+    }
+    if (!style.viewDescriptors) return null;
+    try {
+        const list = style.viewDescriptors.shareableViewDescriptors?.value ?? style.viewDescriptors.descriptors ?? style.viewDescriptors.items;
+        return Array.isArray(list) ? list.length : typeof list?.size === "number" ? list.size : null;
+    } catch {
+        return null;
+    }
+}
+
+function liveHandle(pid: string, using: any): any {
+    for (const key of [pid, "any"]) {
+        const h = handles.get(key);
+        if (!h) continue;
+        const n = viewsOn(h.style);
+        if (n == null || n > 0 || h.style === using) return h.style;
+    }
+    return null;
+}
+
+function noteHandle(props: any) {
+    if (!animatedStyle(props.style)) return;
+    const entry = { style: props.style, at: Date.now() };
+    let pid = "";
+    try {
+        pid = String(participantForFocus(labelOf(props))?.id ?? "");
+    } catch { }
+    if (pid) handles.set(pid, entry);
+    handles.set("any", entry);
+    handleNotes++;
+    if (handles.size > 24) handles.delete(handles.keys().next().value!);
+}
+
 function isWrapper(type: any, props: any): boolean {
     if (typeof type === "string" || props.icon == null || typeof props.onPress !== "function") return false;
     const f = flat(props.style);
@@ -381,6 +431,7 @@ export const watchControls = safe("pip pin controls", (args: any[], ret: any) =>
     const name = nameOf(args[0]) || "anonymous";
     noteButton(`${name} ${placement(props.style)} keys=${Object.keys(props).slice(0, 12).join(",")}${typeof props.children === "function" ? " children=fn" : ""}`);
     if (isWrapper(args[0], props)) {
+        noteHandle(props);
         siblings++;
         pinNote = "maximize seen";
         return;
@@ -583,7 +634,11 @@ function pinConfig(pid: string, source: number): PinConfig {
     const here = pinnedPip() === pid;
     return {
         label: here ? "pop out pip, pinned" : "pop out pip",
-        onPress: safe("pip pin press", () => pinPip(here ? null : pid)),
+        onPress: safe("pip pin press", () => {
+            pinTaps++;
+            lastTap = `${new Date().toISOString().slice(11, 19)} ${here ? "unpinned" : "pinned"} ${pid.slice(-4)}`;
+            pinPip(here ? null : pid);
+        }),
         source,
         tint: here ? accentColor("#ff0048") : undefined,
     };
@@ -713,11 +768,15 @@ function useInsets(): any {
 
 const HOST = { position: "absolute", left: 0, top: 0, right: 0, bottom: 0, zIndex: 50 } as const;
 const CLIP = { position: "absolute", left: 0, top: 0, right: 0, bottom: 0, overflow: "hidden" } as const;
+const MIRROR = { position: "absolute", left: 0, top: 0, right: 0, bottom: 0, transform: [{ scaleY: -1 }] } as const;
+let syncedRenders = 0;
+let pinTaps = 0;
+let lastTap = "";
 const SPOT = { position: "absolute", right: 8, bottom: 8 } as const;
 const SLIDE = 52;
 
 interface ButtonCap { type: any; extra: any; iconKind: "number" | "component"; }
-interface PinState { layout: { width: number; height: number; } | null; check: string; tries: number; seen: any; }
+interface PinState { layout: { width: number; height: number; } | null; check: string; tries: number; seen: any; using?: any; }
 let buttonCap: ButtonCap | null = null;
 let slideMs: number | null = null;
 let layoutNote = "";
@@ -958,6 +1017,23 @@ function Pin({ coords, pid }: { coords: any; pid: string; stream: boolean; }) {
     const source = active && on ? pinIcon() : null;
     const config = source != null ? pinConfig(pid, source) : null;
     const frameStyle = mode === "place" && c ? { position: "absolute", left: c.x, top: c.y, width: c.width, height: c.height, overflow: "hidden" } as const : CLIP;
+    const A = animatedView();
+    const handle = A && config && owned ? liveHandle(pid, me.using) : null;
+    me.using = handle;
+    if (config && owned && A && handle) {
+        syncedRenders++;
+        return <View ref={hostRef} collapsable={false} pointerEvents="box-none" style={HOST} onLayout={onLayout}>
+            <View key="cheeseburger-pin-frame" pointerEvents="box-none" style={frameStyle}>
+                <View pointerEvents="box-none" style={MIRROR}>
+                    {React.createElement(A, { key: "cheeseburger-pin-synced", style: handle, pointerEvents: "box-none" },
+                        <View style={FLIP} pointerEvents="box-none">
+                            <Guard fallback={<PlainPin config={config} />}><PinButton config={config} /></Guard>
+                        </View>,
+                    )}
+                </View>
+            </View>
+        </View>;
+    }
     return <View ref={hostRef} collapsable={false} pointerEvents="box-none" style={HOST} onLayout={onLayout}>
         {config && owned && (
             <View key="cheeseburger-pin-frame" pointerEvents="box-none" style={frameStyle}>
@@ -1426,6 +1502,7 @@ export function pinControlsDebug(): string[] {
     const rec = latest ?? [...markers][0] ?? null;
     return [
         `pins: drawn by cheeseburger, hosts ${hosts}, owned ${owners.size}${owners.size ? ` (${[...owners.values()].map(o => (o.rank === 2 ? "in tile" : "placed")).join(", ")})` : ""}, shown ${shownPins}x, placed ok ${placedOk}, place misses ${placeMisses}, discord button renders ${cloneRenders}, plain renders ${fallbackRenders}, clone errors ${cloneErrors}, reanimated ${A ? "found" : "missing"}`,
+        `sync: ${syncedRenders} renders on discord's own animation, handles ${handles.size} (seen ${handleNotes}x), taps ${pinTaps}${lastTap ? `, last ${lastTap}` : ""}, pinned ${pinnedPip()?.slice(-4) ?? "none"}`,
         `controls: ${controlsUp() ? "up" : "down"} (call toolbar), maximize top ${maxTop ?? "not seen"}, button ${buttonCap ? `discord's ${nameOf(buttonCap.type) || "anonymous"} size=${String(buttonCap.extra.size)} variant=${String(buttonCap.extra.variant)} icon=${buttonCap.iconKind}` : "plain (discord's not seen yet)"}, slide ${slideMs ?? "300 default"}ms${layoutNote ? ` from ${layoutNote}` : ""}`,
         ...placeNotes.map(n => `  ${n}`),
         `maximize: ${pinNote}, seen ${siblings}x`,

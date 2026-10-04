@@ -1010,6 +1010,7 @@ function fromMeasure(shown: boolean) {
 
 let toolbarLast: { y: number; at: number; } | null = null;
 let toolbarRest: number | null = null;
+let toolbarStill = 0;
 let toolbarMove = "";
 let slides = 0;
 
@@ -1024,7 +1025,8 @@ function noteChrome() {
     const prev = toolbarLast;
     toolbarLast = { y: tb.y, at: tb.at };
     const visible = tb.y < Dimensions.get("window").height - 4;
-    if (prev && visible && Math.abs(tb.y - prev.y) <= 0.5) toolbarRest = Math.max(toolbarRest ?? tb.y, tb.y);
+    toolbarStill = prev && visible && Math.abs(tb.y - prev.y) <= 0.5 ? toolbarStill + 1 : 0;
+    if (toolbarStill >= 2) toolbarRest = tb.y;
     if (prev && visible && tb.y > prev.y + 2 && (toolbarRest == null || prev.y >= toolbarRest - 2)) {
         if (chrome) slides++;
         toolbarMove = "sliding away";

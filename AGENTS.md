@@ -111,7 +111,8 @@ Details for `split/`:
 - Pins are drawn by Cheeseburger, not copied from Discord's controls. `tilePinFor` adds a `Pin` next to each tile's probe, only for other people with video.
 - A pin either fills a tile-sized host ("in tile", the stream card) or, when its host is Discord's whole tile container (camera tiles), sits at the tile's coords ("placed"). Placed pins are only used after measuring that the tile really sits at its coords inside that host (`verifyPlace`). One pin per person: "in tile" beats "placed".
 - Spot: bottom 8, right 8, clipped to the tile. It slides 52dp down and fades out when the controls hide, using Discord's transition length when its `layout` object exposes one.
-- When the controls are up comes from the call toolbar (`chromeShown` in `tiles.tsx`). Discord's maximize style can't be used: it's a Reanimated style, so its `top` never changes on the JS side. The toolbar is read every 100ms and a slide is caught from its first moving frame.
+- Show/hide runs on Discord's own animation: the maximize wrapper's Reanimated style handle (captured in `watchControls`, kept per person in `globalThis.__cheeseburgerPinHandles`) is put on the pin inside a vertically mirrored box, so top 8 / -44 becomes bottom 8 / below the edge. It moves on the UI thread in the same frame as maximize. The JS thread lags 200-650ms behind Discord's controls during taps, so anything JS-timed looks slow.
+- Without a handle, the pin falls back to the call toolbar signal (`chromeShown` in `tiles.tsx`), read every 100ms.
 - The button is Discord's own IconButton (type, size and variant copied from the maximize button the first time it renders), with a plain pill until then.
 - Markers in Discord's maximize `Pressable` still report whether the controls exist (`noteControls`, debug only). The pin lab only runs with "Pin reports" on (`labOn`).
 
