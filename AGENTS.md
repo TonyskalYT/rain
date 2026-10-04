@@ -118,6 +118,7 @@ Details for `split/`:
 - Discord moves the container about 24dp when the controls show or hide. Tiles move with it on purpose (that's Discord's own motion). Rest positions are kept per channel, screen size and mode, separately for controls shown and hidden. The origin is the hidden rest; before that's known it's the shown rest plus the learned shift. Samples within 0.9s of a controls or call-state change are skipped.
 - Safe area insets come from every probe (`onInsets`), so rotation updates them. Landscape needs them for the nav bar side.
 - Polling and measuring pause while Discord is in the background.
+- Tile fights are recorded in `split/fight.ts` (kept on `globalThis.__cheeseburgerTileLog`, so updates don't wipe it): every write of ours, every Discord write we catch (`value` setter, `set()`, `modify`) with a short Discord stack, every reset the poll notices with "written through js" or "never saw the write" (a UI-thread write), plus controls, call state, container, origin, target and screen changes. The report shows the last 80 events and up to 3 fights with the 30 events before each.
 
 ## Debugging workflow
 

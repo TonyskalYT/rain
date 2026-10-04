@@ -5,6 +5,7 @@ import { SelectedChannelStore, UserStore } from "@metro/common/stores";
 import { AppState, Dimensions, StatusBar } from "react-native";
 
 import { caught, safe } from "../crash";
+import { ev, fightDebug, noteFight, noteReset, noteWriter } from "./fight";
 import { splitRects, stageRects } from "./geometry";
 import { anyTileProbes, type ContainerSample, hasTileProbe, hasToolbarRef, measured, measureToolbarNow, onInsets, probeDebug, resetTileMeasurements, sampleContainer, toolbarKnown, viewportKey } from "./probe";
 import { splitViewSettings } from "./storage";
@@ -73,6 +74,11 @@ const written = new WeakMap<object, Rect[]>();
 const lastWrite = new WeakMap<object, number>();
 const guards = new Map<object, PropertyDescriptor | null>();
 const modGuards = new Map<object, PropertyDescriptor | null>();
+const setGuards = new Map<object, PropertyDescriptor | null>();
+const kinds = new WeakMap<object, string>();
+const discordWrote = new WeakMap<object, number>();
+const kindOf = (sv: any) => kinds.get(sv) ?? "tile";
+const box = (c: any) => `${Math.round(c?.x)},${Math.round(c?.y)} ${Math.round(c?.width)}x${Math.round(c?.height)}`;
 const moves: string[] = [];
 
 let active = false;
@@ -108,8 +114,9 @@ function writeCoords(sv: any, next: any) {
     }
 }
 
-function write(sv: any, next: any, r: Rect) {
+function write(sv: any, next: any, r: Rect, why = "layout") {
     layoutWrites++;
+    ev(`ours ${kindOf(sv)} -> ${box(r)} (${why})`);
     const list = written.get(sv) ?? [];
     if (!list.some(w => near(w, r))) {
         list.push(r);
@@ -128,16 +135,16 @@ const isCoords = (v: any) => !!v && typeof v === "object" && typeof v.x === "num
 
 const placed = (v: any, r: Rect) => ({ ...v, x: r.x, y: r.y, width: r.width, height: r.height, zIndex: r.z ?? 1 });
 
-function steer(sv: any, v: any) {
+function steer(sv: any, v: any, how = "value") {
     try {
-        return steerTo(sv, v);
+        return steerTo(sv, v, how);
     } catch (e) {
         caught("split steer", e);
         return v;
     }
 }
 
-function steerTo(sv: any, v: any) {
+function steerTo(sv: any, v: any, how: string) {
     if (!active || !mine()) return v;
     const r = targets.get(sv);
     if (!r) return v;
@@ -145,9 +152,18 @@ function steerTo(sv: any, v: any) {
         if (near(v, r)) return v;
         intended.set(sv, { ...v });
         held++;
+        discordWrote.set(sv, Date.now());
+        ev(`discord ${how} ${kindOf(sv)} ${box(v)}, held at ours`);
+        noteWriter(how);
         return placed(v, r);
     }
-    if ((typeof v === "function" && v.__isAnimationDefinition || v && typeof v === "object" && (typeof v.onFrame === "function" || typeof v.onStart === "function")) && intended.has(sv)) {
+    const animation = typeof v === "function" && v.__isAnimationDefinition || v && typeof v === "object" && (typeof v.onFrame === "function" || typeof v.onStart === "function");
+    if (animation) {
+        discordWrote.set(sv, Date.now());
+        ev(`discord ${how} ${kindOf(sv)} animation${intended.has(sv) ? ", held at ours" : ", let through"}`);
+        noteWriter(`${how} animation`);
+    }
+    if (animation && intended.has(sv)) {
         held++;
         return placed(intended.get(sv), r);
     }
@@ -162,9 +178,27 @@ function findDescriptor(obj: any, key: string) {
     return null;
 }
 
+function guardSet(sv: any) {
+    if (setGuards.has(sv) || typeof sv.set !== "function") return;
+    const own = Object.getOwnPropertyDescriptor(sv, "set");
+    if (own && !own.configurable) return;
+    const orig = sv.set;
+    try {
+        Object.defineProperty(sv, "set", {
+            configurable: true,
+            writable: true,
+            value(this: any, v: any) {
+                return orig.call(this, steer(sv, v, "set()"));
+            },
+        });
+        setGuards.set(sv, own ?? null);
+    } catch { }
+}
+
 function guard(sv: any) {
     if (!sv || typeof sv !== "object" || guards.has(sv)) return;
     guardModify(sv);
+    guardSet(sv);
     const found = findDescriptor(sv, "value");
     if (!found?.d.get || !found.d.set) return;
     if (found.own ? !found.d.configurable : !Object.isExtensible(sv)) return;
@@ -197,6 +231,9 @@ function guardModify(sv: any) {
                 if (!r) return orig.apply(this, a);
                 try {
                     held++;
+                    discordWrote.set(sv, Date.now());
+                    ev(`discord modify ${kindOf(sv)}`);
+                    noteWriter("modify");
                     burstUntil = Date.now() + 3000;
                     const cur = readCoords(sv);
                     if (cur && typeof a[0] === "function") {
@@ -205,7 +242,7 @@ function guardModify(sv: any) {
                             if (isCoords(want)) intended.set(sv, { ...want });
                         } catch { }
                     }
-                    if (cur && !near(cur, r)) write(sv, placed(cur, r), r);
+                    if (cur && !near(cur, r)) write(sv, placed(cur, r), r, "after discord modify");
                 } catch (e) {
                     caught("split modify", e);
                 }
@@ -230,6 +267,13 @@ function unguardAll() {
         } catch { }
     }
     modGuards.clear();
+    for (const [sv, d] of setGuards) {
+        try {
+            if (d) Object.defineProperty(sv, "set", d);
+            else delete (sv as any).set;
+        } catch { }
+    }
+    setGuards.clear();
 }
 
 const isVideoRenderer = (props: any) => "isCamera" in props || "videoSpinnerContext" in props;
@@ -646,6 +690,7 @@ function syncViewport() {
     const key = viewportKey();
     const channel = String(SelectedChannelStore?.getVoiceChannelId?.() ?? "");
     if (key === viewport && channel === layoutChannel) return;
+    ev(`screen ${viewport || "?"} -> ${key}${channel !== layoutChannel ? ", new channel" : ""}`);
     viewport = key;
     layoutChannel = channel;
     viewportAt = Date.now();
@@ -667,8 +712,11 @@ let follows = 0;
 let samplesUsed = 0;
 let samplesSkipped = 0;
 let lastSample: (ContainerSample & { shown: boolean; }) | null = null;
+let loggedSample: { x: number; y: number; } | null = null;
+let tilesSig = "";
 
 function logFrame(line: string) {
+    ev(line);
     frameLog.push(`${new Date().toISOString().slice(17, 23)} ${line}`);
     if (frameLog.length > 8) frameLog.shift();
 }
@@ -691,6 +739,7 @@ function stateOf(): string {
 function refreshState() {
     const next = stateOf();
     if (next === stateSig) return;
+    if (stateSig) ev(`call state ${stateSig} -> ${next}`);
     stateSig = next;
     stateAt = Date.now();
     run = null;
@@ -719,6 +768,10 @@ const onContainer = safe("split container sample", (s: ContainerSample) => {
     if (s.viewport !== viewport) return;
     const now = Date.now();
     lastSample = { ...s, shown: chrome };
+    if (!loggedSample || Math.abs(loggedSample.x - s.x) >= 2 || Math.abs(loggedSample.y - s.y) >= 2) {
+        loggedSample = { x: s.x, y: s.y };
+        ev(`container at ${Math.round(s.x)},${Math.round(s.y)}${s.validated ? "" : " (guessed)"}`);
+    }
     if (now - chromeAt < 900 || now - stateAt < 900 || now - viewportAt < 600) {
         run = null;
         samplesSkipped++;
@@ -762,6 +815,7 @@ function updateFrame(win: { width: number; height: number; }) {
 export function setTilesFullscreen(v: boolean) {
     if (fullscreen === v) return;
     fullscreen = v;
+    ev(`mode ${v ? "full screen" : "grid"}`);
     run = null;
     resolveOrigin();
     if (active) scheduleApply();
@@ -837,6 +891,12 @@ function applyLayout() {
     }
     if (!origin) return;
     const all = [...list, ...voice];
+    const sig = all.map(t => `${t.kind}${t.streamId ? ` ${t.streamId}` : ""}`).join(", ");
+    if (sig !== tilesSig) {
+        tilesSig = sig;
+        ev(`tiles: ${sig}`);
+    }
+    for (const t of all) if (t.coords) kinds.set(t.coords, t.kind);
     const current = new Map<any, any>();
     for (const t of all) {
         const cur = readCoords(t.coords);
@@ -859,6 +919,7 @@ function applyLayout() {
         if (!r || !t.coords) continue;
         const prev = targets.get(t.coords);
         if (!prev || !near(prev, r)) targetChanges++;
+        if (prev && !near(prev, r)) ev(`target ${t.kind} ${box(prev)} -> ${box(r)}`);
         targets.set(t.coords, r);
         touched.add(t.coords);
         guard(t.coords);
@@ -866,6 +927,12 @@ function applyLayout() {
         if (cur && (!near(cur, r) || (cur.zIndex ?? 1) !== (r.z ?? 1))) {
             if (prev && near(prev, r)) {
                 noteMove(t, cur, now, r);
+                const js = now - (discordWrote.get(t.coords) ?? 0) < 500;
+                const native = intended.get(t.coords);
+                noteReset(js);
+                const line = `${t.kind} reset to ${box(cur)}${native && near(cur, native) ? " (discord's own layout)" : ""}, ${js ? "written through js" : "never saw the write"}, ${lastWrite.has(t.coords) ? `${now - lastWrite.get(t.coords)!}ms after ours` : "never placed"}`;
+                ev(line);
+                noteFight(line);
                 if (isCoords(cur) && !(written.get(t.coords) ?? []).some(w => near(cur, w))) intended.set(t.coords, { ...cur });
                 burstUntil = now + 3000;
             }
@@ -902,6 +969,7 @@ function scheduleApply() {
 }
 
 function restoreAll() {
+    if (touched.size) ev("gave tiles back to discord");
     for (const sv of touched) {
         const o = intended.get(sv);
         targets.delete(sv);
@@ -912,6 +980,7 @@ function restoreAll() {
 }
 
 function releaseForCalibration() {
+    if (touched.size) ev("gave tiles back to discord to measure");
     for (const sv of touched) {
         const current = readCoords(sv);
         const target = targets.get(sv);
@@ -931,6 +1000,7 @@ function setChrome(v: boolean) {
     if (chrome === v) return;
     chrome = v;
     chromeAt = Date.now();
+    ev(`controls ${v ? "shown" : "hidden"}${toolbarMove ? ` (toolbar ${toolbarMove})` : ""}`);
     run = null;
     setTimeout(safe("split chrome listeners", () => chromeListeners.forEach(l => {
         try {
@@ -1107,6 +1177,7 @@ export function onChrome(l: () => void) {
 }
 
 export function setTilesActive(v: boolean, handoff = false) {
+    if (active !== v) ev(`split ${v ? "on" : "off"}${handoff ? " (update)" : ""}`);
     active = v;
     if (v) {
         shared.owner = copy;
@@ -1170,6 +1241,7 @@ export function tilesDebug(): string[] {
         ...(Dimensions.get("window").width > Dimensions.get("window").height ? [`landscape main: ${list.find(t => t.key === stageMain)?.kind ?? "none"}`] : []),
         ...(moves.length ? ["last moves:", ...moves.map(m => `  ${m}`)] : []),
         ...(frameLog.length ? ["area changes:", ...frameLog.map(m => `  ${m}`)] : []),
+        ...fightDebug(),
         `order setting: ${currentOrder().join(" > ")}`,
         `video sizes: ${[...videoSizes.entries()].map(([id, s]) => `${id}=${s.w}x${s.h}${aspects.has(id) ? ` (${aspects.get(id)!.value.toFixed(2)}${aspects.get(id)!.pending ? ` -> ${aspects.get(id)!.pending!.toFixed(2)}` : ""})` : ""}`).join(", ") || "none yet"}`,
         ...[...list, ...voice].map(t => {
