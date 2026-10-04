@@ -143,13 +143,11 @@ export default function Settings() {
                             <TableSwitchRow label="Split button" subLabel="hold it to arrange" value={split.showButton} onValueChange={(v: boolean) => split.updateSettings({ showButton: v })} />
                             <TableRow
                                 label="Arrange"
-                                subLabel={currentOrder().map(k => LABELS[k]).join(" · ")}
+                                subLabel={`${currentOrder().map(k => LABELS[k]).join(" · ")}, pick the pip`}
                                 arrow
                                 onPress={() => showSheet("CheeseburgerArrange", ArrangeSheet)}
                             />
                             <TableSwitchRow label="Smart PiP" subLabel="never shows you, sticks to streams" value={split.smartPip !== false} onValueChange={(v: boolean) => split.updateSettings({ smartPip: v })} />
-                            <TableSwitchRow label="PiP pin buttons" subLabel="tap one on a video to lock the PiP to it" value={split.pipPins !== false} onValueChange={(v: boolean) => split.updateSettings({ pipPins: v })} />
-                            {split.pipPins !== false && <TableSwitchRow label="Pin reports" subLabel="sends pin checks to your debug repo during calls" value={split.labOn === true} onValueChange={(v: boolean) => split.updateSettings({ labOn: v })} />}
                         </>
                     )}
                     <TableSwitchRow

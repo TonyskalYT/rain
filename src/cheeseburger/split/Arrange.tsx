@@ -173,6 +173,7 @@ function PipList() {
     const check = firstAsset("CheckmarkLargeIcon", "CheckmarkSmallIcon", "CheckIcon", "ic_check");
     const mark = (on: boolean) => on ? (check !== undefined ? <TableRow.Icon source={check} /> : <TableRow.TrailingText text="on" />) : undefined;
     const auto = !pinned || !choices.some(c => c.id === pinned);
+    if (!choices.length) return null;
     return (
         <TableRowGroup title="PiP shows">
             <TableRow label="auto" trailing={mark(auto)} onPress={safe("arrange pip auto", () => pinPip(null))} />

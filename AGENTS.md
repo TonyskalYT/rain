@@ -60,7 +60,7 @@ If the release comes back 404, the `latest` release was left as a draft. Push an
 | `toolbar.tsx` | Clones Discord's soundboard toolbar button so the added buttons match Discord's look and colors |
 | `split/` | Split view |
 | `split/pip.ts` | PiP shape, smart PiP (never shows you, sticks to streams), PiP pins |
-| `split/PipPin.tsx` | Pin buttons on video tiles |
+| `split/PipPin.tsx` | Old tile pin buttons, now switched off |
 | `rotate/` | Rotate button |
 | `share/` | Moves "share screen" from the toolbar into the swipe-up menu |
 | `voice/` | "voice effects" row in the swipe-up menu that opens a sheet: presets, mic volume past 100%, distortion, lo-fi, reset |
@@ -107,15 +107,10 @@ Details for `split/`:
 - Lo-fi caps `Connection.setVoiceBitRate` / `setBitRate` (24 kbps down to 8 kbps) and restores Discord's last bitrate after.
 - Real pitch, robot or echo effects aren't possible: Discord's Android engine has no audio processing the mod can reach.
 
-**Pin buttons (`split/PipPin.tsx`)**
-- The Arrange sheet (hold the split button) has a "PiP shows" list: auto, or one of the other people's screens or cameras (`pipChoices` in `pip.ts`). It sets the same pin as the tile pins.
-- Pins are drawn by Cheeseburger, not copied from Discord's controls. `tilePinFor` adds a `Pin` next to each tile's probe, only for other people with video.
-- A pin either fills a tile-sized host ("in tile", the stream card) or, when its host is Discord's whole tile container (camera tiles), sits at the tile's coords ("placed"). Placed pins are only used after measuring that the tile really sits at its coords inside that host (`verifyPlace`). One pin per person: "in tile" beats "placed".
-- Spot: bottom 8, right 8, clipped to the tile. It slides 52dp down and fades out when the controls hide, using Discord's transition length when its `layout` object exposes one.
-- Show/hide runs on Discord's own animation: the maximize wrapper's Reanimated style handle (captured in `watchControls`, kept per person in `globalThis.__cheeseburgerPinHandles`) is put on the pin inside a vertically mirrored box, so top 8 / -44 becomes bottom 8 / below the edge. It moves on the UI thread in the same frame as maximize. The JS thread lags 200-650ms behind Discord's controls during taps, so anything JS-timed looks slow.
-- Without a handle, the pin falls back to the call toolbar signal (`chromeShown` in `tiles.tsx`), read every 100ms.
-- The button is Discord's own IconButton (type, size and variant copied from the maximize button the first time it renders), with a plain pill until then.
-- Markers in Discord's maximize `Pressable` still report whether the controls exist (`noteControls`, debug only). The pin lab only runs with "Pin reports" on (`labOn`).
+**Picking the PiP**
+- Charles gave up on pin buttons drawn on tiles. The PiP is picked in the Arrange sheet (hold the split button): "PiP shows" lists auto plus everyone else's screen and camera (`pipChoices` in `pip.ts`), and sets the same pin (`pinPip`).
+- `split/PipPin.tsx` is still loaded but draws nothing: `startPins` maps `TilePin`, `InlinePin` and `Marker` to an empty component so pins already mounted from older copies go away, and the jsx hooks for tile pins and maximize markers are no longer installed.
+- Learned along the way: Discord's maximize hides through a Reanimated style (`controlsHidden` is a shared value), so its JS props never change on toggle, and the JS thread lags 200-650ms behind Discord's controls during taps.
 
 **Tile layout (`split/tiles.tsx`, `split/probe.tsx`)**
 - Tiles are placed in screen space, converted with the origin of Discord's tile container.
@@ -133,7 +128,7 @@ Pin lab reports land in the same repo as `lab-latest.txt` and `lab/`, on their o
 He usually sends reports from the settings page, after the call screen is closed, so anything you need from the call screen has to be remembered until then.
 
 Read `latest.txt` before guessing. It includes versions, settings, the call, crashes, split, PiP, style, share, volume, voice and rotate.
-The split section has `container:` (how the last origin sample went), `origin:` and `rests here:` lines, and `controls:` shows what the toolbar was doing. Pins show `placed`/`not placed` notes with the measured tile and host.
+The split section has `container:` (how the last origin sample went), `origin:` and `rests here:` lines, and `controls:` shows what the toolbar was doing.
 Unexpected closes are logged with what Sentry said about the last run, the JS heap at the last heartbeat, the mic and boost levels and the uptime. When something is unclear, add a line to the relevant `*Debug()` function and ask him to send again.
 
 ## Open items

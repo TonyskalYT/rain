@@ -8,7 +8,7 @@ import { safe } from "../crash";
 import { useToolbar } from "../toolbar";
 import { isFullscreenSplit, isLandscapeAuto, isSplitActive, resumeSplit, startLayoutPatches, stopLayoutPatches } from "./layout";
 import { isPipRender, startPip, stopPip } from "./pip";
-import { startPins, stopPins, tilePinFor, watchControls } from "./PipPin";
+import { startPins, stopPins } from "./PipPin";
 import { withTileProbe } from "./probe";
 import { SplitViewButton } from "./SplitView";
 import { useSplitViewSettings } from "./storage";
@@ -24,7 +24,7 @@ const addProbe = safe("split probe", (args: any[], ret: any) => {
     const props = args[1];
     if (isPipRender() || !ret || !props?.sharedCoords) return;
     if (!isTileElement(args) && props.participant == null && props.participantId == null && props.id == null && props.userId == null) return;
-    return withTileProbe(ret, props.sharedCoords, tilePinFor(props));
+    return withTileProbe(ret, props.sharedCoords);
 });
 
 const register = safe("split tiles", (args: any[]) => {
@@ -62,9 +62,6 @@ export default {
         unpatches.push(after("jsx", jsxRuntime, addProbe));
         unpatches.push(after("jsxs", jsxRuntime, addProbe));
         unpatches.push(after("createElement", React, addProbe));
-        unpatches.push(after("jsx", jsxRuntime, watchControls));
-        unpatches.push(after("jsxs", jsxRuntime, watchControls));
-        unpatches.push(after("createElement", React, watchControls));
         unpatches.push(useToolbar());
         const handoff = g.__cheeseburgerSplit;
         if (handoff) {

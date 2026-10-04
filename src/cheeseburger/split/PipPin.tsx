@@ -1466,10 +1466,12 @@ function cleanOldHooks() {
     G.__cheeseburgerPinControls = null;
 }
 
+const Gone = () => null;
+
 export function startPins() {
     active = true;
     cleanOldHooks();
-    G.__cheeseburgerPinImpl = { TilePin: Pin, InlinePin, Marker };
+    G.__cheeseburgerPinImpl = { TilePin: Gone, InlinePin: Gone, Marker: Gone };
     for (const bump of [...shells]) {
         try {
             bump();
