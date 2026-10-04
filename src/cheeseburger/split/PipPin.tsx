@@ -1,7 +1,7 @@
 import { findAsset } from "@api/assets";
 import { findByProps, findByStoreName } from "@metro";
 import { React } from "@metro/common";
-import { Animated as RNAnimated, Image, Pressable, StyleSheet, View } from "react-native";
+import { Animated as RNAnimated, Easing, Image, Pressable, StyleSheet, View } from "react-native";
 
 import { caught, safe } from "../crash";
 import { accentColor } from "../style/colors";
@@ -372,15 +372,17 @@ function isWrapper(type: any, props: any): boolean {
 export const watchControls = safe("pip pin controls", (args: any[], ret: any) => {
     if (!active || !ret || typeof ret !== "object" || isPipRender()) return;
     const props = ret.props;
-    if (!props || props[MARK] || !focusLabel(props)) return;
+    if (!props || props[MARK]) return;
+    const stop = STOP.test(labelOf(props));
+    if (!stop && !focusLabel(props)) return;
+    noteSignals(args[0], props, !stop);
+    if (stop) return;
     const name = nameOf(args[0]) || "anonymous";
     noteButton(`${name} ${placement(props.style)} keys=${Object.keys(props).slice(0, 12).join(",")}${typeof props.children === "function" ? " children=fn" : ""}`);
     if (isWrapper(args[0], props)) {
-        if (splitViewSettings.pipPins === false) return;
         siblings++;
-        pinNote = "next to discord's maximize";
-        const pin = React.createElement(Shell, { key: INLINE, part: "InlinePin", props: { owner: null, button: ret, path: [] } });
-        return React.createElement(React.Fragment, { key: ret.key ?? undefined }, ret, pin);
+        pinNote = "maximize seen";
+        return;
     }
     const ch = props.children;
     if (!/Pressable|Touchable/i.test(name) || ch == null || typeof ch !== "object") return;
@@ -708,116 +710,159 @@ function useInsets(): any {
     }
 }
 
-function Pin({ coords, pid, stream }: { coords: any; pid: string; stream: boolean; }) {
+const CLIP = { position: "absolute", left: 0, top: 0, right: 0, bottom: 0, overflow: "hidden", zIndex: 50 } as const;
+const SPOT = { position: "absolute", right: 8, bottom: 8 } as const;
+const SLIDE = 52;
+
+interface ButtonCap { type: any; extra: any; iconKind: "number" | "component"; }
+let buttonCap: ButtonCap | null = null;
+let upState: boolean | null = null;
+let upFrom = "";
+let slideMs: number | null = null;
+let layoutNote = "";
+let shownPins = 0;
+const upListeners = new Set<() => void>();
+let upQueued = false;
+
+function noteUp(v: boolean, from: string) {
+    upFrom = from;
+    if (upState === v) return;
+    upState = v;
+    if (upQueued) return;
+    upQueued = true;
+    Promise.resolve().then(() => {
+        upQueued = false;
+        upListeners.forEach(l => {
+            try {
+                l();
+            } catch (e) {
+                caught("pip pin up", e);
+            }
+        });
+    });
+}
+
+const controlsUp = () => upState ?? chromeShown();
+
+function noteLayout(layout: any) {
+    if (!layout || typeof layout !== "object") return;
+    const d = [layout.durationV, layout.durationMs, layout._duration, layout.duration].find(v => typeof v === "number" && v > 0 && v < 2000);
+    if (typeof d === "number") slideMs = d;
+    if (!layoutNote) {
+        try {
+            layoutNote = `${nameOf(layout.constructor) || "object"} {${Object.keys(layout).slice(0, 10).map(k => `${k}:${typeof layout[k] === "number" ? layout[k] : typeof layout[k]}`).join(",")}}`;
+        } catch {
+            layoutNote = "unreadable";
+        }
+    }
+}
+
+function noteSignals(type: any, props: any, capture: boolean) {
+    const f = flat(props.style);
+    if (f.position === "absolute" && typeof f.top === "number" && (f.right != null || f.left != null)) {
+        noteUp(f.top >= 0, nameOf(type) || "anonymous");
+        if (props.layout) noteLayout(props.layout);
+        return;
+    }
+    if (!capture || buttonCap || typeof type === "string" || props.icon == null || typeof props.onPress !== "function") return;
+    if (props.size == null || props.variant == null || "scaleAmountInPx" in props || "pressed" in props) return;
+    buttonCap = {
+        type,
+        extra: { size: props.size, variant: props.variant, maxFontSizeMultiplier: props.maxFontSizeMultiplier },
+        iconKind: typeof props.icon === "number" ? "number" : "component",
+    };
+    Promise.resolve().then(notifyNow);
+}
+
+function PlainPin({ config }: { config: PinConfig; }) {
+    fallbackRenders++;
+    return <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={config.label}
+        hitSlop={6}
+        onPress={config.onPress}
+        style={({ pressed }: any) => ({ width: 32, height: 32, alignItems: "center", justifyContent: "center", backgroundColor: "#00000085", borderRadius: 8, opacity: pressed ? 0.7 : 1 })}
+    >
+        <Image source={config.source} style={{ width: 18, height: 18, tintColor: config.tint ?? "#ffffff" }} />
+    </Pressable>;
+}
+
+function PinButton({ config }: { config: PinConfig; }) {
+    const cap = buttonCap;
+    if (!cap) return <PlainPin config={config} />;
+    cloneRenders++;
+    const icon = cap.iconKind === "number" ? config.source : glyphType(config);
+    return React.createElement(cap.type, { ...cap.extra, icon, onPress: config.onPress, accessibilityLabel: config.label, [MARK]: true });
+}
+
+function Pin({ coords, pid }: { coords: any; pid: string; stream: boolean; }) {
     const safeArea = useInsets();
+    if (safeArea) noteSafeArea(safeArea);
     const on = useSplitViewSettings((s: any) => s.pipPins !== false);
     const [, force] = React.useReducer((n: number) => n + 1, 0);
-    const owner = React.useRef({}).current;
-    const host = React.useRef<any>(null);
-    const pinFiber = React.useRef<any>(null);
-    const tileBox = React.useRef<Box | null>(null);
-    const misses = React.useRef(0);
-    const [valid, setValid] = React.useState(false);
-    const kind = stream ? "stream" : "camera";
-
-    if (safeArea) noteSafeArea(safeArea);
+    const [fits, setFits] = React.useState(false);
+    const me = React.useRef({}).current;
+    const owned = fits && (owners.get(pid) ?? me) === me;
+    const show = active && on && owned && controlsUp();
+    const anim = React.useRef(new RNAnimated.Value(show ? 1 : 0)).current;
 
     React.useLayoutEffect(() => {
         hosts++;
         listeners.add(force);
+        upListeners.add(force);
         const offPin = onPinChange(force);
         const offChrome = onChrome(force);
         return () => {
             hosts--;
             listeners.delete(force);
+            upListeners.delete(force);
             offPin();
             offChrome();
-            if (owners.get(pid) === owner) {
+            if (owners.get(pid) === me) {
                 owners.delete(pid);
                 notifyNow();
             }
         };
     }, []);
 
-    React.useLayoutEffect(() => {
-        if (!pinFiber.current && host.current) pinFiber.current = fiberOf(host.current);
-        if (valid && !owners.has(pid)) {
-            owners.set(pid, owner);
+    React.useEffect(() => {
+        if (fits && !owners.has(pid)) {
+            owners.set(pid, me);
             force();
-        } else if (!valid && owners.get(pid) === owner) {
+        } else if (!fits && owners.get(pid) === me) {
             owners.delete(pid);
             notifyNow();
         }
-    });
-
-    const check = safe("pip pin host", (layout: { width: number; height: number; }) => {
-        const c = readCoords(coords);
-        if (sizeOk(layout, c)) {
-            misses.current = 0;
-            if (!valid) setValid(true);
-            return;
-        }
-        noteSize(`${kind} host ${Math.round(layout.width)}x${Math.round(layout.height)} vs tile ${Math.round(c?.width)}x${Math.round(c?.height)}`);
-        if (++misses.current >= 2 && valid) setValid(false);
-    });
-
-    const onLayout = safe("pip pin layout", (e: any) => {
-        const layout = e?.nativeEvent?.layout;
-        if (layout) check(layout);
-    });
-
-    const fallbackOnly = !fcType;
-    const visible = fallbackOnly && active && on && valid && owners.get(pid) === owner;
-    const match = visible ? matchFor(pinFiber.current, tileBox.current) : null;
+    }, [fits]);
 
     React.useEffect(() => {
-        if (!visible) return;
-        const locate = safe("pip pin locate", () => {
-            for (const m of markers) measureNode(m.node, b => {
-                m.rect = { ...b, at: Date.now() };
-            });
-            setTimeout(safe("pip pin match", () => measureNode(host.current, tile => {
-                tileBox.current = tile;
-                const m = matchFor(pinFiber.current, tile);
-                if (!m?.rec.rect || !contains(tile, m.rec.rect)) return;
-                const next = insetFrom(tile, m.rec.rect);
-                const prev = insets.get(kind);
-                if (!prev || prev.right !== next.right || prev.bottom !== next.bottom || prev.from !== next.from) {
-                    insets.set(kind, next);
-                    notifyNow();
-                }
-            })), 120);
-        });
-        locate();
-        const timer = setInterval(locate, 2000);
-        return () => clearInterval(timer);
-    }, [visible, match?.rec]);
+        if (show) shownPins++;
+        const a = RNAnimated.timing(anim, { toValue: show ? 1 : 0, duration: slideMs ?? 300, easing: Easing.out(Easing.cubic), useNativeDriver: true });
+        a.start();
+        return () => a.stop();
+    }, [show]);
 
-    let content: any = null;
-    const source = visible ? pinIcon() : null;
-    if (visible && source != null && !inlines.get(pid)) {
-        const config = pinConfig(pid, source);
-        const inset = insets.get(kind) ?? insets.get(stream ? "camera" : "stream") ?? { right: 8, bottom: 8, from: "default" };
-        const fallback = <Fallback config={config} />;
-        const rec = match?.rec ?? (markers.size ? null : undefined);
-        let inner: any = null;
-        if (rec?.template) {
-            const clone = cloneOf(rec.template, config);
-            if (clone) {
-                cloneRenders++;
-                inner = <Levels levels={match!.levels}><Guard fallback={fallback}>{clone}</Guard></Levels>;
-            } else inner = fallback;
-        } else if (rec === undefined && !markersEver) {
-            fallbackRenders++;
-            inner = fallback;
-        }
-        content = <View key="cheeseburger-pin-spot" pointerEvents="box-none" style={{ position: "absolute", right: inset.right, bottom: inset.bottom }}>
-            {inner}
-        </View>;
-    }
+    const onLayout = React.useMemo(() => safe("pip pin fit", (e: any) => {
+        const l = e?.nativeEvent?.layout;
+        if (!l) return;
+        const c = readCoords(coords);
+        const ok = sizeOk(l, c);
+        if (!ok) noteSize(`host ${Math.round(l.width)}x${Math.round(l.height)} vs tile ${Math.round(c?.width)}x${Math.round(c?.height)}`);
+        setFits(ok);
+    }), [coords]);
 
-    return <View ref={host} collapsable={false} pointerEvents="box-none" style={[FILL, { zIndex: 50 }]} onLayout={onLayout}>
-        {content}
+    const source = active && on ? pinIcon() : null;
+    const config = source != null ? pinConfig(pid, source) : null;
+    return <View collapsable={false} pointerEvents="box-none" style={CLIP} onLayout={onLayout}>
+        {config && owned && (
+            <RNAnimated.View
+                key="cheeseburger-pin-spot"
+                pointerEvents={show ? "box-none" : "none"}
+                style={[SPOT, { opacity: anim, transform: [{ translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [SLIDE, 0] }) }] }]}
+            >
+                <Guard fallback={<PlainPin config={config} />}><PinButton config={config} /></Guard>
+            </RNAnimated.View>
+        )}
     </View>;
 }
 
@@ -1259,16 +1304,21 @@ export function stopPins() {
     notifyNow();
 }
 
-export function tilePinFor(_props: any): any {
-    return null;
+export function tilePinFor(props: any): any {
+    if (!active || !props?.sharedCoords || isPipRender()) return null;
+    const participant = participantForPin(props);
+    if (!participant || participant.id == null || mineParticipant(participant)) return null;
+    const stream = participant.type === 0 || String(participant.id).startsWith("call:");
+    return React.createElement(Shell, { key: `cheeseburger-pin-${participant.id}`, part: "TilePin", props: { coords: props.sharedCoords, pid: String(participant.id), stream } });
 }
 
 export function pinControlsDebug(): string[] {
     const A = animatedView();
     const rec = latest ?? [...markers][0] ?? null;
     return [
-        `pins: inline mounts ${inlineMounts}, renders ${inlineRenders} (from render ${fromRender}, from markers ${fromMarker}), live ${[...inlines.values()].map(r => r.why).join(", ") || "none"}, clone errors ${cloneErrors}, reanimated ${A ? "found" : "missing"}`,
-        `controls hook: ${pinNote}, next to maximize ${siblings}x`,
+        `pins: drawn by cheeseburger, tiles ${hosts}, owned ${owners.size}, shown ${shownPins}x, discord button renders ${cloneRenders}, plain renders ${fallbackRenders}, clone errors ${cloneErrors}, reanimated ${A ? "found" : "missing"}`,
+        `controls: ${controlsUp() ? "up" : "down"} (${upState === null ? `from chrome, ${chromeShown() ? "shown" : "hidden"}` : `from ${upFrom}`}), button ${buttonCap ? `discord's ${nameOf(buttonCap.type) || "anonymous"} size=${String(buttonCap.extra.size)} variant=${String(buttonCap.extra.variant)} icon=${buttonCap.iconKind}` : "plain (discord's not seen yet)"}, slide ${slideMs ?? "300 default"}ms${layoutNote ? ` from ${layoutNote}` : ""}`,
+        `maximize: ${pinNote}, seen ${siblings}x`,
         `pin states: ${whyLog.join(" | ") || "none yet"}`,
         `flip: ${unflipNotes.join("; ") || "nothing wrapped yet"}`,
         `fallback layer: hosts ${hosts}, owners ${owners.size}, markers ${markers.size} (ever ${markersEver}, injected ${injected}), fibers ${fibersFound} found ${fibersMissing} missing, clone renders ${cloneRenders}, plain renders ${fallbackRenders}, safe area ${safeAreaNote()}`,

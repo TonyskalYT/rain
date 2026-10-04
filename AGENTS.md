@@ -108,10 +108,12 @@ Details for `split/`:
 - Real pitch, robot or echo effects aren't possible: Discord's Android engine has no audio processing the mod can reach.
 
 **Pin buttons (`split/PipPin.tsx`)**
-- `watchControls` (a jsx after-hook) spots Discord's maximize wrapper as it's created (Focus label, `icon`, `onPress`, absolute style) and returns it in a Fragment with an `InlinePin` right after it. Nothing patches `FloatingControls` any more: patching its module export only worked when the patch landed before Discord grabbed the component, so pins came and went between sessions.
-- The pin is a copy of Discord's maximize element inside a full-size `scaleY: -1` container. That mirrors its spot (top 8 to bottom 8) and its slide animation. The button inside is flipped back so the icon and bevel stay upright.
-- Markers injected into Discord's maximize `Pressable` still report whether the controls are up (`noteControls`). `TilePin` is off.
-- The pin lab only runs with the "Pin reports" setting (`labOn`, off by default). It samples where maximize, the pin, X and the name pill sit for about 1.5s and uploads `lab-latest.txt`.
+- Pins are drawn by Cheeseburger, not copied from Discord's controls. `tilePinFor` adds a `Pin` next to each tile's probe (inside the tile-sized wrapper). It shows only when its box matches the tile's coords (`onLayout`, so the PiP card and other hosts are skipped), one per person, never on your own tile.
+- Spot: bottom 8, right 8, inside a clipping box. It slides 52dp down and fades out when the controls hide, mirroring maximize, using Discord's own transition length when its `layout` object exposes one.
+- When the controls are up comes from Discord's own X and maximize wrappers as they render (absolute style, `top` 8 shown, -44 hidden), falling back to the tracked controls state.
+- The button is Discord's own IconButton (type, size and variant copied from the maximize button the first time it renders), with a plain pill until then.
+- Markers in Discord's maximize `Pressable` still report whether the controls exist (`noteControls`). The old `InlinePin` clone is no longer injected. The pin lab only runs with "Pin reports" on (`labOn`).
+- `Pin` also feeds Discord's safe area to the tile layout (`noteSafeArea`), which landscape needs.
 
 **Tile layout (`split/tiles.tsx`)**
 - Tiles are placed in screen space, converted with the origin of Discord's tile container. Discord slides that container about 24dp when the controls show or hide.
