@@ -12,6 +12,7 @@ import { View } from "react-native";
 import { caught, safe, safeInstead } from "../crash";
 import { engineDebug, hookEngine, traceLocalVolume, unhookEngine } from "./engine";
 import { hookRoute, readRoute, routeDebug, unhookRoute } from "./route";
+import { hookSounds, soundsDebug, unhookSounds } from "./sounds";
 import { useVolumeBoostSettings, volumeBoostSettings } from "./storage";
 import { boostTestDebug } from "./test";
 import { note, short, trail } from "./trail";
@@ -192,6 +193,7 @@ export function volumeDebug(): string[] {
     lines.push(...engineDebug());
     lines.push(...boostTestDebug());
     lines.push(...routeDebug());
+    lines.push(...soundsDebug());
     lines.push("files:", ...modulePaths());
     lines.push("calls:", ...(trail.length ? trail.map(t => `  ${t}`) : ["  none yet"]));
     return lines;
@@ -230,6 +232,7 @@ const onRtcState = safe("volume rtc", (e: any) => {
         if (!running) return;
         applyToConnections();
         readRoute();
+        hookSounds();
     }), 300);
 });
 
@@ -419,6 +422,11 @@ export default {
         running = true;
         hookRoute();
         readRoute();
+        try {
+            hookSounds();
+        } catch (e) {
+            caught("sound guard", e);
+        }
 
         const sliderBefore = safe("volume slider", jsxBefore);
         const sliderAfter = safe("volume label", jsxAfter);
@@ -540,5 +548,6 @@ export default {
         trail.length = 0;
         unhookEngine();
         unhookRoute();
+        unhookSounds();
     },
 };
