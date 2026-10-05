@@ -12,7 +12,7 @@ interface TestLog { running: string | null; output: string[]; input: string[]; }
 
 const G = globalThis as any;
 const log: TestLog = G.__cheeseburgerVolumeTest ??= { running: null, output: [], input: [] };
-const WANTED = /level|energy|duration|volume|gain|power|rms|peak|speech|voice|loud/i;
+const WANTED = /level|energy|duration|volume|gain|power|rms|peak|speech|voice|loud|db/i;
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(safe("volume test wait", () => resolve()), ms));
 const stamp = () => new Date().toISOString().slice(11, 19);
@@ -52,7 +52,7 @@ function nativeModule(): any {
     }
 }
 
-function getStats(conn: any): Promise<any> {
+function settle<T>(start: (done: (v: T | null) => void) => void, ms = 1500): Promise<T | null> {
     return new Promise(resolve => {
         let done = false;
         const finish = safe("volume test stats", (v: any) => {
@@ -61,20 +61,74 @@ function getStats(conn: any): Promise<any> {
             resolve(v ?? null);
         });
         try {
-            const r = conn.getStats(finish);
-            if (r && typeof r.then === "function") r.then(finish, () => finish(null));
-            else if (r && typeof r === "object") finish(r);
+            start(finish);
         } catch {
             finish(null);
         }
-        setTimeout(safe("volume test timeout", () => finish(null)), 1500);
+        setTimeout(safe("volume test timeout", () => finish(null)), ms);
     });
 }
 
+function viaPromiseOrCallback(call: (cb: (v: any) => void) => any, done: (v: any) => void) {
+    const r = call(done);
+    if (r && typeof r.then === "function") r.then(done, () => done(null));
+    else if (r != null && typeof r !== "undefined") done(r);
+}
+
+const fromConnection = (conn: any) => settle<any>(done => viaPromiseOrCallback(cb => conn.getStats(cb), done));
+
+function fromNative(conn: any): Promise<any> {
+    const native = nativeModule();
+    const id = conn?.mediaEngineConnectionId;
+    if (typeof native?.connectionInstanceGetStats !== "function" || id == null) return Promise.resolve(null);
+    return settle<any>(done => {
+        try {
+            viaPromiseOrCallback(cb => native.connectionInstanceGetStats(id, cb), done);
+        } catch {
+            viaPromiseOrCallback(() => native.connectionInstanceGetStats(id), done);
+        }
+    });
+}
+
+function normalize(v: any, depth = 0): any {
+    if (depth === 0 && typeof v === "string") {
+        try {
+            return normalize(JSON.parse(v), 1);
+        } catch {
+            return v;
+        }
+    }
+    if (!v || typeof v !== "object" || depth > 9) return v;
+    if (v instanceof Map) return Object.fromEntries([...v.entries()].map(([k, x]) => [String(k), normalize(x, depth + 1)]));
+    if (Array.isArray(v)) return v.map(x => normalize(x, depth + 1));
+    if (typeof v.forEach === "function" && typeof v.get === "function" && typeof v.has === "function") {
+        const o: any = {};
+        try {
+            v.forEach((x: any, k: any) => {
+                o[String(k)] = normalize(x, depth + 1);
+            });
+        } catch { }
+        return o;
+    }
+    const o: any = {};
+    for (const k of Object.keys(v).slice(0, 120)) o[k] = normalize(v[k], depth + 1);
+    return o;
+}
+
+const LEVEL = /level|energy|loud|rms|power|volume|gain|peak|db/i;
+
 function walk(v: any, path: string[], out: Entry[], depth: number) {
-    if (!v || typeof v !== "object" || depth > 7 || out.length > 40) return;
-    if (!Array.isArray(v) && (v.type === "audio" || v.kind === "audio" || "audioLevel" in v || "totalAudioEnergy" in v || "audio_level" in v)) out.push({ path: path.join("."), obj: v });
-    for (const k of Object.keys(v).slice(0, 80)) walk(v[k], [...path, k], out, depth + 1);
+    if (!v || typeof v !== "object" || depth > 8 || out.length > 60) return;
+    if (!Array.isArray(v) && Object.keys(v).some(k => LEVEL.test(k) && typeof v[k] === "number")) out.push({ path: path.join("."), obj: v });
+    for (const k of Object.keys(v).slice(0, 120)) walk(v[k], [...path, k], out, depth + 1);
+}
+
+function numericNames(v: any, out: Set<string>, depth = 0) {
+    if (!v || typeof v !== "object" || depth > 8 || out.size > 60) return;
+    for (const k of Object.keys(v).slice(0, 120)) {
+        if (typeof v[k] === "number") out.add(k);
+        else numericNames(v[k], out, depth + 1);
+    }
 }
 
 function numbers(obj: any): Record<string, number> {
@@ -92,24 +146,32 @@ function numbers(obj: any): Record<string, number> {
 function shape(v: any, depth = 0): string {
     if (Array.isArray(v)) return `[${v.length}${v.length ? ` ${shape(v[0], depth + 1)}` : ""}]`;
     if (!v || typeof v !== "object") return typeof v;
-    if (depth > 2) return "{…}";
-    return `{${Object.keys(v).slice(0, 10).map(k => `${k.length > 12 ? short(k) : k}:${shape(v[k], depth + 1)}`).join(",")}}`;
+    if (depth > 3) return "{…}";
+    return `{${Object.keys(v).slice(0, 12).map(k => `${k.length > 12 ? short(k) : k}:${shape(v[k], depth + 1)}`).join(",")}}`;
 }
 
+const label = (e: Entry) => `${e.path.split(".").map(p => (p.length > 12 ? short(p) : p)).join(".")}${e.obj.type ? ` type=${e.obj.type}` : ""}${e.obj.kind ? ` kind=${e.obj.kind}` : ""}${e.obj.ssrc != null ? ` ssrc=${e.obj.ssrc}` : ""}`;
+
 function pick(entries: Entry[], mode: "inbound" | "outbound", userId: string, ssrc: any): Entry | null {
-    const audio = (e: Entry) => e.obj.type === "audio" || e.obj.kind === "audio" || "audioLevel" in e.obj || "totalAudioEnergy" in e.obj;
-    const bySsrc = entries.find(e => ssrc != null && String(e.obj.ssrc) === String(ssrc) && audio(e));
+    const video = (e: Entry) => e.obj.type === "video" || e.obj.kind === "video" || /video/i.test(e.path);
+    const pool = entries.filter(e => !video(e));
+    const bySsrc = pool.find(e => ssrc != null && String(e.obj.ssrc) === String(ssrc));
     if (bySsrc) return bySsrc;
-    if (mode === "inbound") return entries.find(e => e.path.includes(userId) && audio(e)) ?? null;
-    return entries.find(e => /outbound|send|local/i.test(e.path) && audio(e)) ?? null;
+    if (mode === "inbound") {
+        const mine = pool.find(e => userId && (e.path.includes(userId) || String(e.obj.userId ?? e.obj.user_id ?? "") === userId));
+        if (mine) return mine;
+        const incoming = pool.filter(e => /inbound|recv|receive|remote/i.test(e.path) || /inbound|remote/i.test(String(e.obj.type ?? "")));
+        return incoming.length === 1 ? incoming[0] : null;
+    }
+    return pool.find(e => /outbound|send|local|media-source|sender|input/i.test(e.path) || /outbound|media-source|local/i.test(String(e.obj.type ?? ""))) ?? null;
 }
 
 interface Plan { title: string; values: number[]; set: (v: number) => string | null; restore: () => void; mode: "inbound" | "outbound"; userId: string; ssrc: () => any; }
 
 async function measure(conn: any, plan: Plan, lines: string[]): Promise<Sample[]> {
     const samples: Sample[] = [];
+    let source: "connection" | "native" | null = null;
     let entry: Entry | null = null;
-    let first = true;
     for (const [phase, value] of plan.values.entries()) {
         const err = plan.set(value);
         if (err) {
@@ -118,26 +180,40 @@ async function measure(conn: any, plan: Plan, lines: string[]): Promise<Sample[]
         }
         await sleep(450);
         for (let i = 0; i < 5; i++) {
-            const stats = await getStats(conn);
-            if (stats && first) {
-                first = false;
-                lines.push(`  stats shape: ${shape(stats)}`.slice(0, 600));
+            let hit: Entry | null = null;
+            const order: ("connection" | "native")[] = source ? [source] : ["connection", "native"];
+            for (const which of order) {
+                const raw = which === "connection" ? await fromConnection(conn) : await fromNative(conn);
+                const stats = normalize(raw);
+                const entries: Entry[] = [];
+                walk(stats, [], entries, 0);
+                const found = pick(entries, plan.mode, plan.userId, plan.ssrc());
+                if (!source && phase === 0 && i === 0) {
+                    lines.push(`  ${which} stats: ${raw == null ? "nothing came back" : `${typeof raw === "string" ? "text " : ""}${shape(stats)}`}`.slice(0, 900));
+                    if (raw != null) {
+                        const names = new Set<string>();
+                        numericNames(stats, names);
+                        lines.push(`  ${which} number fields: ${[...names].join(",") || "none"}`.slice(0, 700));
+                        lines.push(`  ${which} level entries: ${entries.slice(0, 8).map(label).join(" | ") || "none"}`.slice(0, 700));
+                    }
+                }
+                if (found) {
+                    source = which;
+                    hit = found;
+                    break;
+                }
             }
-            const entries: Entry[] = [];
-            walk(stats, [], entries, 0);
-            const hit = pick(entries, plan.mode, plan.userId, plan.ssrc());
             if (hit) {
                 if (!entry) {
                     entry = hit;
-                    lines.push(`  audio stats at ${hit.path.split(".").map(p => (p.length > 12 ? short(p) : p)).join(".")}: ${Object.keys(numbers(hit.obj)).join(",").slice(0, 400)}`);
+                    lines.push(`  using ${source} ${label(hit)}: ${Object.keys(numbers(hit.obj)).join(",").slice(0, 400)}`);
                 }
                 samples.push({ value, phase, fields: numbers(hit.obj), at: Date.now() });
-            } else if (i === 0 && value === plan.values[0]) {
-                lines.push(`  no ${plan.mode} audio found among ${entries.length} audio entries: ${entries.slice(0, 6).map(e => e.path).join(" | ") || "none"}`);
             }
-            await sleep(220);
+            await sleep(200);
         }
     }
+    if (!entry) lines.push(`  no ${plan.mode === "inbound" ? "incoming audio for that person" : "outgoing audio"} with a level in either stats source`);
     return samples;
 }
 
@@ -196,7 +272,7 @@ function summarize(samples: Sample[], values: number[], lines: string[]): { rati
 }
 
 function verdict(kind: "boost" | "mic", r: ReturnType<typeof summarize>, high: number, mid: number, low: number): string {
-    if (!r.field) return "discord's stats have no audio level to measure with";
+    if (!r.field) return "couldn't find audio levels in discord's stats, send a debug";
     if (r.quiet) return kind === "boost" ? "nobody talked during the test" : "no sound from your mic during the test";
     if (r.ratioLow != null && r.ratioLow < 1.15) return `the level didn't change from ${pct(low)} to ${pct(mid)} either, so these stats can't show volume`;
     if (r.ratioHigh == null) return "not enough samples";
