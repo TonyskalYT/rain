@@ -3,6 +3,7 @@ import { findByStoreName } from "@metro";
 
 import { caught, safe } from "../crash";
 import { micPercent, rawInput } from "../voice/mic";
+import { readRoute } from "./route";
 import { volumeBoostSettings } from "./storage";
 import { short } from "./trail";
 
@@ -282,10 +283,10 @@ function summarize(samples: Sample[], values: number[], lines: string[]): Levels
 
 type Vote = "works" | "capped" | "loud" | "flat";
 
-function verdict(kind: "boost" | "mic", r: Levels, values: number[]): string {
+function verdict(r: Levels, values: number[]): string {
     const [lo, mid, hi] = values;
     if (!r.field) return "couldn't find audio levels in discord's stats, send a debug";
-    if (r.quiet) return kind === "boost" ? "nobody talked during the test" : "no sound from your mic during the test";
+    if (r.quiet) return "no sound from your mic during the test";
     const votes: Vote[] = [];
     const ratios: number[] = [];
     for (const [a, b, c] of r.rounds) {
@@ -301,84 +302,39 @@ function verdict(kind: "boost" | "mic", r: Levels, values: number[]): string {
     if (!votes.length) return "not enough sound, keep talking the whole time";
     const count = (v: Vote) => votes.filter(x => x === v).length;
     const top = (["works", "capped", "loud", "flat"] as Vote[]).sort((x, y) => count(y) - count(x))[0];
-    if (count(top) * 2 <= votes.length) return `mixed results (${votes.join(", ")}), ${kind === "boost" ? "run it again while they keep talking" : "run it again and keep talking"}`;
+    if (count(top) * 2 <= votes.length) return `mixed results (${votes.join(", ")}), run it again and keep talking`;
     const got = ratios.length ? short(ratios.sort((x, y) => x - y)[Math.floor(ratios.length / 2)]) : "?";
-    if (top === "loud") return `too loud to tell, ${times(mid)} already maxes out the meter, ${kind === "boost" ? "try with someone quieter" : "talk a bit quieter"}`;
+    if (top === "loud") return `too loud to tell, ${times(mid)} already maxes out the meter, talk a bit quieter`;
     if (top === "flat") return `the level didn't change from ${times(lo)} to ${times(mid)} either, so these stats can't show volume`;
-    if (top === "capped") return `capped at 200%: ${times(hi)} measured about the same as ${times(mid)} (x${got}), discord's android audio engine won't go higher`;
+    if (top === "capped") return `capped at 200%: ${times(hi)} measured the same as ${times(mid)} (x${got}), discord won't go higher`;
     return `works: ${times(hi)} measured x${got} of ${times(mid)} (200%)`;
 }
 
-async function runTest(kind: "boost" | "mic") {
+async function runMicTest() {
     const lines: string[] = [];
     const conn = defaultConnection();
-    const target = kind === "boost" ? log.output : log.input;
     const finish = (text: string) => {
         lines.push(`  result: ${text}`);
-        target.splice(0, target.length, ...lines);
+        log.input.splice(0, log.input.length, ...lines);
         log.running = null;
-        showToast(`${kind === "boost" ? "boost" : "mic"} test: ${text}`.slice(0, 120));
+        showToast(`mic test: ${text}`.slice(0, 120));
     };
     if (!conn) {
-        lines.push(`${kind} test ${stamp()}: no call`);
+        lines.push(`mic test ${stamp()}: no call`);
         finish("join a call first");
         return;
     }
-    let plan: Plan;
-    if (kind === "boost") {
-        const boosted = Object.entries(volumeBoostSettings.boosted ?? {}).find(([k]) => k.startsWith("default:"));
-        const userId = boosted?.[0].split(":")[1] ?? Object.keys(conn.remoteAudioSSRCs ?? {}).find(id => id !== conn.userId);
-        const native = nativeModule();
-        if (!userId || typeof native?.connectionInstanceSetLocalVolume !== "function") {
-            lines.push(`boost test ${stamp()}: ${userId ? "native volume call missing" : "nobody to test"}`);
-            finish(userId ? "can't reach discord's audio engine" : "nobody else in the call");
-            return;
-        }
-        const id = connId(conn);
-        if (id == null) {
-            lines.push(`boost test ${stamp()}: connection id ${String(conn.mediaEngineConnectionId)} isn't a number`);
-            finish("can't tell which call connection to test");
-            return;
-        }
-        plan = {
-            title: `boost test ${stamp()} on ${shortId(userId)}, connection ${String(conn.mediaEngineConnectionId)} (${id}), ssrc ${String(conn.remoteAudioSSRCs?.[userId] ?? "?")}`,
-            values: [1, 2, 4, 1, 2, 4, 1, 2, 4],
-            set: v => {
-                try {
-                    native.connectionInstanceSetLocalVolume(id, userId, v);
-                    return null;
-                } catch (e) {
-                    return String((e as any)?.message ?? e).slice(0, 200);
-                }
-            },
-            restore: () => {
-                let current = 100;
-                try {
-                    current = findByStoreName("MediaEngineStore")?.getLocalVolume?.(userId, "default") ?? 100;
-                } catch { }
-                try {
-                    conn.setLocalVolume(userId, current);
-                } catch (e) {
-                    caught("boost test restore", e);
-                }
-            },
-            mode: "inbound",
-            userId,
-            ssrc: () => conn.remoteAudioSSRCs?.[userId],
-        };
-    } else {
-        plan = {
-            title: `mic test ${stamp()}, connection ${String(conn.mediaEngineConnectionId)}, ssrc ${String(conn.audioSSRC ?? "?")}, mic set to ${micPercent()}%`,
-            values: [1, 2, 4, 1, 2, 4, 1, 2, 4],
-            set: v => rawInput(v),
-            restore: () => {
-                rawInput(null);
-            },
-            mode: "outbound",
-            userId: String(conn.userId ?? ""),
-            ssrc: () => conn.audioSSRC,
-        };
-    }
+    const plan: Plan = {
+        title: `mic test ${stamp()}, connection ${String(conn.mediaEngineConnectionId)}, ssrc ${String(conn.audioSSRC ?? "?")}, mic set to ${micPercent()}%`,
+        values: [1, 2, 4, 1, 2, 4, 1, 2, 4],
+        set: v => rawInput(v),
+        restore: () => {
+            rawInput(null);
+        },
+        mode: "outbound",
+        userId: String(conn.userId ?? ""),
+        ssrc: () => conn.audioSSRC,
+    };
     lines.push(plan.title);
     try {
         const samples = await measure(conn, plan, lines);
@@ -388,9 +344,9 @@ async function runTest(kind: "boost" | "mic") {
             finish(`couldn't change the volume: ${plan.failed.slice(0, 60)}`);
             return;
         }
-        finish(verdict(kind, summarize(samples, plan.values, lines), plan.values));
+        finish(verdict(summarize(samples, plan.values, lines), plan.values));
     } catch (e) {
-        caught(`${kind} test`, e);
+        caught("mic test", e);
         try {
             plan.restore();
         } catch { }
@@ -398,18 +354,74 @@ async function runTest(kind: "boost" | "mic") {
     }
 }
 
+function startListen() {
+    const conn = defaultConnection();
+    const native = nativeModule();
+    const id = connId(conn);
+    const boosted = Object.entries(volumeBoostSettings.boosted ?? {}).find(([k]) => k.startsWith("default:"));
+    const userId = boosted?.[0].split(":")[1] ?? Object.keys(conn?.remoteAudioSSRCs ?? {}).find(u => u !== conn?.userId);
+    const lines = [`listen test ${stamp()}${userId ? ` on ${shortId(userId)}` : ""}, connection ${String(conn?.mediaEngineConnectionId)} (${id})`];
+    const stop = (text: string, toast: string) => {
+        lines.push(`  result: ${text}`);
+        log.output.splice(0, log.output.length, ...lines);
+        log.running = null;
+        showToast(toast);
+    };
+    if (!conn) return stop("not in a call", "join a call first");
+    if (!userId) return stop("nobody else in the call", "nobody else in the call");
+    if (typeof native?.connectionInstanceSetLocalVolume !== "function" || id == null) return stop("can't reach the audio engine", "can't reach discord's audio engine");
+    log.running = "listen";
+    readRoute();
+    showToast("listen, they'll flip between 200% and 400% every 2s");
+    const restore = () => {
+        let current = 100;
+        try {
+            current = findByStoreName("MediaEngineStore")?.getLocalVolume?.(userId, "default") ?? 100;
+        } catch { }
+        try {
+            conn.setLocalVolume(userId, current);
+        } catch (e) {
+            caught("listen test restore", e);
+        }
+    };
+    let step = 0;
+    const tick = safe("listen test", () => {
+        if (step >= 6) {
+            restore();
+            stop("done, flipped 6 times", "listen test done");
+            return;
+        }
+        const v = step % 2 ? 8 : 2;
+        try {
+            native.connectionInstanceSetLocalVolume(id, userId, v);
+            lines.push(`  ${stamp()} ${v === 8 ? "400%" : "200%"} (x${v})`);
+        } catch (e) {
+            restore();
+            stop(`couldn't set x${v}: ${String((e as any)?.message ?? e).slice(0, 120)}`, "couldn't change their volume");
+            return;
+        }
+        step++;
+        setTimeout(tick, 2000);
+    });
+    tick();
+}
+
 export function startVolumeTest(kind: "boost" | "mic") {
     if (log.running) {
         showToast("a test is already running");
         return;
     }
+    if (kind === "boost") {
+        startListen();
+        return;
+    }
     log.running = kind;
-    showToast(kind === "boost" ? "testing for 15s, someone has to talk" : "testing for 15s, keep talking");
-    runTest(kind).catch(safe("volume test", (e: any) => {
+    showToast("testing for 15s, keep talking");
+    runMicTest().catch(safe("volume test", (e: any) => {
         log.running = null;
         caught("volume test", e);
     }));
 }
 
-export const boostTestDebug = () => (log.output.length ? log.output : ["boost test: not run yet (settings > test boost)"]);
+export const boostTestDebug = () => (log.output.length ? log.output : ["listen test: not run yet (settings > test boost)"]);
 export const micTestDebug = () => (log.input.length ? log.input : ["mic test: not run yet (settings > test mic boost)"]);

@@ -11,6 +11,7 @@ import { View } from "react-native";
 
 import { caught, safe, safeInstead } from "../crash";
 import { engineDebug, hookEngine, traceLocalVolume, unhookEngine } from "./engine";
+import { hookRoute, readRoute, routeDebug, unhookRoute } from "./route";
 import { useVolumeBoostSettings, volumeBoostSettings } from "./storage";
 import { boostTestDebug } from "./test";
 import { note, short, trail } from "./trail";
@@ -184,6 +185,7 @@ export function volumeDebug(): string[] {
     if (!found) lines.push("no media engine");
     lines.push(...engineDebug());
     lines.push(...boostTestDebug());
+    lines.push(...routeDebug());
     lines.push("files:", ...modulePaths());
     lines.push("calls:", ...(trail.length ? trail.map(t => `  ${t}`) : ["  none yet"]));
     return lines;
@@ -219,7 +221,9 @@ function applyNow(userId?: string) {
 
 const onRtcState = safe("volume rtc", (e: any) => {
     if (e?.state === "RTC_CONNECTED") setTimeout(safe("volume rtc apply", () => {
-        if (running) applyToConnections();
+        if (!running) return;
+        applyToConnections();
+        readRoute();
     }), 300);
 });
 
@@ -395,6 +399,8 @@ export default {
     async start() {
         await waitForHydration(useVolumeBoostSettings);
         running = true;
+        hookRoute();
+        readRoute();
 
         const sliderBefore = safe("volume slider", jsxBefore);
         const sliderAfter = safe("volume label", jsxAfter);
@@ -515,5 +521,6 @@ export default {
         observed = new WeakSet<object>();
         trail.length = 0;
         unhookEngine();
+        unhookRoute();
     },
 };

@@ -109,7 +109,7 @@ export default function Settings() {
                                 trailing={boosted ? <TableRow.TrailingText text={String(boosted)} /> : undefined}
                                 onPress={() => volume.updateSettings({ boosted: {} })}
                             />
-                            <TableRow label="Test boost" subLabel="someone has to talk, takes 15s" onPress={() => startVolumeTest("boost")} />
+                            <TableRow label="Test boost" subLabel="someone talks, they flip 200% to 400%" onPress={() => startVolumeTest("boost")} />
                         </>
                     )}
                     <TableSwitchRow
