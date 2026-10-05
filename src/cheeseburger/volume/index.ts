@@ -20,6 +20,10 @@ import VolumeLabel, { emitSliderValue } from "./VolumeLabel";
 const DISCORD_MAX = 200;
 const BOOSTABLE = new Set(["default", "stream"]);
 const raised: Record<string, number> = {};
+const skipped: Record<string, number> = {};
+const count = (o: Record<string, number>, k: string) => {
+    o[k] = (o[k] ?? 0) + 1;
+};
 const unpatches: (() => unknown)[] = [];
 let patchedProtos = new WeakSet<object>();
 
@@ -163,7 +167,7 @@ function modulePaths(): string[] {
 
 export function volumeDebug(): string[] {
     const store = getMediaEngineStore();
-    const lines: string[] = [`sliders raised: ${Object.entries(raised).map(([c, n]) => `${c} ${n}`).join(", ") || "none yet"}`, `max ${maxPercent()}%, boosted: ${Object.entries(volumeBoostSettings.boosted ?? {}).map(([k, v]) => `${k.split(":")[0]} ${short(k.split(":")[1])}=${v}`).join(", ") || "none"}`];
+    const lines: string[] = [`sliders raised: ${Object.entries(raised).map(([c, n]) => `${c} ${n}`).join(", ") || "none yet"}; left alone: ${Object.entries(skipped).map(([c, n]) => `${c} x${n}`).join(", ") || "none"}`, `max ${maxPercent()}%, boosted: ${Object.entries(volumeBoostSettings.boosted ?? {}).map(([k, v]) => `${k.split(":")[0]} ${short(k.split(":")[1])}=${v}`).join(", ") || "none"}`];
     const users = [...new Set(Object.keys(volumeBoostSettings.boosted ?? {}).map(k => k.split(":")[1]))];
     for (const u of users) {
         const safe = (ctx: string) => {
@@ -316,12 +320,23 @@ function sliderTarget(value: unknown): SliderTarget | null {
 function jsxBefore(args: any[]) {
     const props = args[1];
     if (!props || typeof props !== "object") return;
-    if (props.maximumValue !== DISCORD_MAX || typeof props.onValueChange !== "function") return;
+    if (typeof props.onValueChange !== "function" || typeof props.maximumValue !== "number") return;
+    if (props.maximumValue !== DISCORD_MAX) {
+        if (props.maximumValue !== maxPercent()) count(skipped, `max ${props.maximumValue}`);
+        return;
+    }
 
     const target = sliderTarget(props.value) ?? sliderTargets.get(props.onValueChange);
-    if (!target || !BOOSTABLE.has(target.context)) return;
+    if (!target) {
+        count(skipped, "max 200 with no owner");
+        return;
+    }
+    if (!BOOSTABLE.has(target.context)) {
+        count(skipped, `${target.context} volume`);
+        return;
+    }
     sliderTargets.set(props.onValueChange, target);
-    raised[target.context] = (raised[target.context] ?? 0) + 1;
+    count(raised, target.context);
 
     const next: any = {
         ...props,
