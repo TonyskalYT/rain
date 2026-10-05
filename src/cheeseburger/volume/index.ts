@@ -12,6 +12,7 @@ import { View } from "react-native";
 import { caught, safe, safeInstead } from "../crash";
 import { engineDebug, hookEngine, traceLocalVolume, unhookEngine } from "./engine";
 import { useVolumeBoostSettings, volumeBoostSettings } from "./storage";
+import { boostTestDebug } from "./test";
 import { note, short, trail } from "./trail";
 import VolumeLabel, { emitSliderValue } from "./VolumeLabel";
 
@@ -182,6 +183,7 @@ export function volumeDebug(): string[] {
     });
     if (!found) lines.push("no media engine");
     lines.push(...engineDebug());
+    lines.push(...boostTestDebug());
     lines.push("files:", ...modulePaths());
     lines.push("calls:", ...(trail.length ? trail.map(t => `  ${t}`) : ["  none yet"]));
     return lines;

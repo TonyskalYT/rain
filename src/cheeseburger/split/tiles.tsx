@@ -681,11 +681,11 @@ let viewportAt = 0;
 shared.origins?.clear();
 const books = shared.books ??= new Map<string, Book>();
 const shifts = shared.shifts ??= new Map<string, Origin>();
-if (shared.originPolicy !== "container") {
+if (shared.originPolicy !== "container2") {
     books.clear();
     shifts.clear();
 }
-shared.originPolicy = "container";
+shared.originPolicy = "container2";
 let originFrom = "waiting";
 const frameLog: string[] = [];
 let frameNote = "";
@@ -722,6 +722,7 @@ let samplesUsed = 0;
 let samplesSkipped = 0;
 let lastSample: (ContainerSample & { shown: boolean; }) | null = null;
 let loggedSample: { x: number; y: number; } | null = null;
+let implausible = 0;
 let tilesSig = "";
 
 function logFrame(line: string) {
@@ -784,6 +785,12 @@ const onContainer = safe("split container sample", (s: ContainerSample) => {
     if (now - chromeAt < 900 || now - stateAt < 900 || now - viewportAt < 600) {
         run = null;
         samplesSkipped++;
+        return;
+    }
+    const win = Dimensions.get("window");
+    if (win.height > win.width && (s.x < 4 || s.y < statusBar() - 4)) {
+        run = null;
+        implausible++;
         return;
     }
     if (!s.validated && now - lastAnyWrite < 1200) {
@@ -1312,7 +1319,7 @@ export function tilesDebug(): string[] {
         ...probeDebug(),
         `coordinate sources: ${[...coordsCandidates.entries()].slice(0, 16).map(([id, candidates]) => `${id}=${[...candidates.values()].slice(0, 4).map(source => `${source.outer ? "frame" : "renderer"}:${source.name ?? "unnamed"}${source.streamId ? ` sid${source.streamId}` : ""}${source.onSize ? " size callback" : ""}${hasTileProbe(source.coords) ? " mounted" : ""} ${fmt(readCoords(source.coords))} [${source.keys ?? ""}] layout=${source.layout ?? "unknown"}`).join(" | ")}`).join("; ") || "none"}`,
         `frames: equal 16:9, outer participants ${list.filter(t => [...coordsById.values()].some(source => source.outer && source.coords === t.coords)).length}, avatar sources ${voice.length}`,
-        `origin: ${origin ? `${origin.x},${origin.y} from ${originFrom}` : "none"}, state ${stateSig || "?"}, changed ${follows}x, samples used ${samplesUsed}, skipped while moving ${samplesSkipped}${run ? `, checking ${Math.round(run.x)},${Math.round(run.y)} (${run.count})` : ""}`,
+        `origin: ${origin ? `${origin.x},${origin.y} from ${originFrom}` : "none"}, state ${stateSig || "?"}, changed ${follows}x, samples used ${samplesUsed}, skipped while moving ${samplesSkipped}, ignored off-grid ${implausible}${run ? `, checking ${Math.round(run.x)},${Math.round(run.y)} (${run.count})` : ""}`,
         `rests here: ${(() => {
             const b = books.get(bookKey());
             const sh = shifts.get(shiftKey());

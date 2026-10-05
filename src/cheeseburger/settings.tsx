@@ -20,6 +20,7 @@ import { baseColor } from "./style/colors";
 import { useStyleSettings } from "./style/storage";
 import { buildRevision, syncNow, updateNow, useSync, useUpdateReady } from "./updates";
 import { useVolumeBoostSettings } from "./volume/storage";
+import { startVolumeTest } from "./volume/test";
 
 function icon(...names: string[]) {
     const id = names.map(n => findAssetId(n)).find(x => x !== undefined);
@@ -108,6 +109,7 @@ export default function Settings() {
                                 trailing={boosted ? <TableRow.TrailingText text={String(boosted)} /> : undefined}
                                 onPress={() => volume.updateSettings({ boosted: {} })}
                             />
+                            <TableRow label="Test boost" subLabel="someone has to talk, takes 10s" onPress={() => startVolumeTest("boost")} />
                         </>
                     )}
                     <TableSwitchRow
@@ -129,6 +131,7 @@ export default function Settings() {
                         value={s.voice !== false}
                         onValueChange={(v: boolean) => setFeature("voice", v)}
                     />
+                    {s.voice !== false && <TableRow label="Test mic boost" subLabel="talk for 10s" onPress={() => startVolumeTest("mic")} />}
                 </TableRowGroup>
 
                 <TableRowGroup title="Video">

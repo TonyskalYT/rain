@@ -5,6 +5,7 @@ import { hideSheet } from "@api/ui/sheets";
 import { React } from "@metro/common";
 
 import { caught, safe } from "../crash";
+import { micTestDebug } from "../volume/test";
 import { micDebug, startMic, stopMic } from "./mic";
 import { voiceProbeDebug } from "./probe";
 import { MenuGroup, MenuRow, opened } from "./Row";
@@ -176,6 +177,7 @@ export function voiceDebug(): string[] {
         `group: ${group || "not seen yet"}`,
         `slider: ${sliderFrom || "not rendered yet"}, widths ${Object.entries(widths).map(([k, v]) => `${k}=${v}`).join(" ") || "-"}`,
         ...voiceProbeDebug(),
+        ...micTestDebug(),
     ];
 }
 

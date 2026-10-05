@@ -414,6 +414,20 @@ function applyAllNow() {
 
 export const applyMic = applyAllNow;
 
+export function rawInput(mult: number | null): string | null {
+    if (!hook || !lastArgs || slot < 0 || base == null) return "discord hasn't set the mic yet, join a call first";
+    const a = [...lastArgs];
+    a[slot] = base * (mult == null ? running ? factor() : 1 : mult);
+    try {
+        hook.orig.apply(hook.obj, a);
+        sent = a[slot];
+    } catch (e) {
+        caught("mic test", e);
+        return "couldn't set the mic";
+    }
+    return null;
+}
+
 function schedule() {
     const now = Date.now();
     if (now - lastApply >= 60) {

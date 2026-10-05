@@ -118,6 +118,7 @@ Details for `split/`:
 **Tile layout (`split/tiles.tsx`, `split/probe.tsx`)**
 - Tiles are placed in screen space, converted with the origin of Discord's tile container.
 - The origin is measured, not guessed: `sampleContainer` measures each tile's own view and the views above its probe, and only trusts a sample when one of those views sits exactly at tile position minus coords. Views without a public instance are measured through `nativeFabricUIManager.measureInWindow(stateNode.node)`.
+- In portrait, container rests left of x 4 or above the status bar are ignored: the call screen's open animation parks the container at 0,0 for a second or two, and learning that put every tile 12dp off for several seconds.
 - Discord moves the container about 24dp when the controls show or hide. Tiles move with it on purpose (that's Discord's own motion). Rest positions are kept per channel, screen size and mode, separately for controls shown and hidden. The origin is the hidden rest; before that's known it's the shown rest plus the learned shift. Samples within 0.9s of a controls or call-state change are skipped.
 - Safe area insets come from every probe (`onInsets`), so rotation updates them. Landscape needs them for the nav bar side.
 - Polling and measuring pause while Discord is in the background.
@@ -142,5 +143,5 @@ Unexpected closes are logged with what Sentry said about the last run, the JS he
 
 - The in-app floating PiP (not Android PiP) may ignore pins. Its source isn't identified yet; the debug report logs the PiP components' inputs.
 - The Messages button in the guild rail is scoped for a bevel through its "Messages" label. It's unconfirmed on the phone.
-- Volume boost beyond 200% is unverified.
-- Mic volume past 100%, distortion and lo-fi are unverified by ear. The debug report's `voice` section shows which layer is hooked and what was sent.
+- Volume past 200% (output and mic) reportedly does nothing. JS sends the boosted values all the way to the native module (`connectionInstanceSetLocalVolume(conn, user, 10)` and `setInputVolume(10)`), so the suspicion is that Discord's native audio engine clamps at 2 (200%). Settings has "Test boost" and "Test mic boost" (`volume/test.ts`): they switch the native value between 1, 2 and the boost for 10s while someone talks, read `conn.getStats()` and compare the measured loudness (`totalAudioEnergy` per second, else `audioLevel`) of the user's inbound audio or our outbound audio. The 100% to 200% step is the control: if that doesn't change either, the stats can't show volume. Results are in the debug report (`volume` and `voice` sections) and in a toast. If it's capped: for the mic, Discord's AGC (currently off) is the next thing to try; for output, the global `setOutputVolume` combined with lower per-user volumes for everyone else.
+- Mic distortion and lo-fi are unverified by ear. The debug report's `voice` section shows which layer is hooked and what was sent.
