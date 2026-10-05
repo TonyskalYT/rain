@@ -413,8 +413,8 @@ async function runListen(lines: string[], stop: (text: string, toast: string) =>
     showToast("looking for sound...");
     const found = await findSound(conns);
     lines.push(`  sound: ${found.slice(0, 4).map(s => `${context(s.conn)} ${shortId(s.userId)} ${short(s.level)}`).join(", ") || "none"}`);
-    const src = found[0];
-    if (!src || src.level < 0.02) return stop("nothing playing", "nothing's playing, put on a music bot or watch a stream with sound");
+    const src = found.find(s => context(s.conn) === "default" && s.level >= 0.02) ?? found[0];
+    if (!src || src.level < 0.02) return stop("nothing playing", "nobody's making sound, someone has to talk (a music bot works too)");
     const id = connId(src.conn);
     if (id == null) return stop(`connection id ${String(src.conn?.mediaEngineConnectionId)} isn't a number`, "can't reach discord's audio engine");
     const ctx = context(src.conn);
