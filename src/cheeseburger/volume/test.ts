@@ -4,7 +4,6 @@ import { findByStoreName } from "@metro";
 import { caught, safe } from "../crash";
 import { micPercent, rawInput } from "../voice/mic";
 import { readRoute } from "./route";
-import { volumeBoostSettings } from "./storage";
 import { short } from "./trail";
 
 interface Entry { path: string; obj: any; }
@@ -354,32 +353,80 @@ async function runMicTest() {
     }
 }
 
-function startListen() {
-    const conn = defaultConnection();
+interface Source { conn: any; userId: string; level: number; }
+
+function connections(): any[] {
+    const out: any[] = [];
+    try {
+        engine()?.eachConnection?.((conn: any) => {
+            out.push(conn);
+        });
+    } catch { }
+    return out;
+}
+
+function inboundLevels(conn: any, raw: any): Source[] {
+    const entries: Entry[] = [];
+    walk(normalize(raw), [], entries, 0);
+    const out: Source[] = [];
+    for (const e of entries) {
+        const parts = e.path.split(".");
+        const at = parts.indexOf("inbound");
+        const userId = at >= 0 ? parts[at + 1] : undefined;
+        const level = e.obj.audioLevel;
+        if (!userId || userId === String(conn?.userId) || typeof level !== "number" || e.obj.type === "video" || e.obj.kind === "video") continue;
+        out.push({ conn, userId, level });
+    }
+    return out;
+}
+
+async function findSound(conns: any[]): Promise<Source[]> {
+    const best = new Map<string, Source>();
+    for (let i = 0; i < 6; i++) {
+        for (const conn of conns) {
+            for (const src of inboundLevels(conn, await fromConnection(conn))) {
+                const key = `${context(conn)}:${src.userId}`;
+                const prev = best.get(key);
+                if (!prev || src.level > prev.level) best.set(key, src);
+            }
+        }
+        await sleep(200);
+    }
+    return [...best.values()].sort((a, b) => b.level - a.level);
+}
+
+function nameOf(src: Source): string {
+    let name: string | null = null;
+    try {
+        const u = findByStoreName("UserStore")?.getUser?.(src.userId);
+        name = u?.globalName ?? u?.global_name ?? u?.username ?? null;
+    } catch { }
+    if (context(src.conn) === "stream") return name ? `${name}'s stream` : "their stream";
+    return name ?? "them";
+}
+
+async function runListen(lines: string[], stop: (text: string, toast: string) => void) {
     const native = nativeModule();
-    const id = connId(conn);
-    const boosted = Object.entries(volumeBoostSettings.boosted ?? {}).find(([k]) => k.startsWith("default:"));
-    const userId = boosted?.[0].split(":")[1] ?? Object.keys(conn?.remoteAudioSSRCs ?? {}).find(u => u !== conn?.userId);
-    const lines = [`listen test ${stamp()}${userId ? ` on ${shortId(userId)}` : ""}, connection ${String(conn?.mediaEngineConnectionId)} (${id})`];
-    const stop = (text: string, toast: string) => {
-        lines.push(`  result: ${text}`);
-        log.output.splice(0, log.output.length, ...lines);
-        log.running = null;
-        showToast(toast);
-    };
-    if (!conn) return stop("not in a call", "join a call first");
-    if (!userId) return stop("nobody else in the call", "nobody else in the call");
-    if (typeof native?.connectionInstanceSetLocalVolume !== "function" || id == null) return stop("can't reach the audio engine", "can't reach discord's audio engine");
-    log.running = "listen";
-    readRoute();
-    showToast("listen, they'll flip between 200% and 400% every 2s");
+    if (typeof native?.connectionInstanceSetLocalVolume !== "function") return stop("can't reach the audio engine", "can't reach discord's audio engine");
+    const conns = connections();
+    if (!conns.length) return stop("not in a call", "join a call first");
+    showToast("looking for sound...");
+    const found = await findSound(conns);
+    lines.push(`  sound: ${found.slice(0, 4).map(s => `${context(s.conn)} ${shortId(s.userId)} ${short(s.level)}`).join(", ") || "none"}`);
+    const src = found[0];
+    if (!src || src.level < 0.02) return stop("nothing playing", "nothing's playing, put on a music bot or watch a stream with sound");
+    const id = connId(src.conn);
+    if (id == null) return stop(`connection id ${String(src.conn?.mediaEngineConnectionId)} isn't a number`, "can't reach discord's audio engine");
+    const ctx = context(src.conn);
+    lines.push(`  testing ${ctx} ${shortId(src.userId)} on connection ${String(src.conn.mediaEngineConnectionId)} (${id})`);
+    showToast(`listen to ${nameOf(src)}, flipping 200% and 400% every 2s`);
     const restore = () => {
         let current = 100;
         try {
-            current = findByStoreName("MediaEngineStore")?.getLocalVolume?.(userId, "default") ?? 100;
+            current = findByStoreName("MediaEngineStore")?.getLocalVolume?.(src.userId, ctx) ?? 100;
         } catch { }
         try {
-            conn.setLocalVolume(userId, current);
+            src.conn.setLocalVolume(src.userId, current);
         } catch (e) {
             caught("listen test restore", e);
         }
@@ -393,17 +440,37 @@ function startListen() {
         }
         const v = step % 2 ? 8 : 2;
         try {
-            native.connectionInstanceSetLocalVolume(id, userId, v);
-            lines.push(`  ${stamp()} ${v === 8 ? "400%" : "200%"} (x${v})`);
+            native.connectionInstanceSetLocalVolume(id, src.userId, v);
         } catch (e) {
             restore();
             stop(`couldn't set x${v}: ${String((e as any)?.message ?? e).slice(0, 120)}`, "couldn't change their volume");
             return;
         }
+        const at = lines.push(`  ${stamp()} ${v === 8 ? "400%" : "200%"} (x${v})`) - 1;
+        fromConnection(src.conn).then(safe("listen test level", (raw: any) => {
+            const now = inboundLevels(src.conn, raw).find(x => x.userId === src.userId);
+            if (now) lines[at] += `, sound ${short(now.level)}`;
+        }));
         step++;
         setTimeout(tick, 2000);
     });
     tick();
+}
+
+function startListen() {
+    const lines = [`listen test ${stamp()}`];
+    const stop = (text: string, toast: string) => {
+        lines.push(`  result: ${text}`);
+        log.output.splice(0, log.output.length, ...lines);
+        log.running = null;
+        showToast(toast);
+    };
+    log.running = "listen";
+    readRoute();
+    runListen(lines, stop).catch(safe("listen test", (e: any) => {
+        caught("listen test", e);
+        stop(`stopped: ${String(e?.message ?? e).slice(0, 60)}`, "listen test stopped");
+    }));
 }
 
 export function startVolumeTest(kind: "boost" | "mic") {
