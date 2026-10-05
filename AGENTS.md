@@ -74,6 +74,9 @@ Details for `split/`:
 
 ## Discord internals learned from debug reports
 
+**Theme updates**
+- "Update now" compares the fetched theme with the stored one. The core runs colors through chroma, which rounds alpha (`#0a0607b2` is stored as `#0a0607b3`), so colors are compared as rgb plus alpha rounded to 2 decimals (`hexColor` in `updates/index.tsx`). Comparing raw strings made it report "1 theme updated" every time.
+
 **Call toolbar**
 - Toolbar buttons: `modules/.../VoicePanelSoundboardButton.tsx` and `VoicePanelScreenshareButton.tsx`, both default exports, built on `AnimatedButtonWrapper`.
 - Swipe-up menu rows: `VoicePanelVoiceControlsButtons.tsx` (ChatButton, ScreenshareButton, and others).
@@ -108,7 +111,7 @@ Details for `split/`:
 - Real pitch, robot or echo effects aren't possible: Discord's Android engine has no audio processing the mod can reach.
 
 **Picking the PiP**
-- Charles gave up on pin buttons drawn on tiles. The PiP is picked in the Arrange sheet (hold the split button): the Screen and Them rows have a pin button next to the up/down arrows. Tapping it locks the PiP to that kind (`pipChoices` in `pip.ts`, then `pinPip`); with several people of that kind it steps through them, then back to auto. The row's sub label says who it's locked to. Me has no pin.
+- Charles gave up on pin buttons drawn on tiles. The PiP is picked in the Arrange sheet (hold the split button): the Screen and Them rows have a pin button next to the up/down arrows. Tapping it locks the PiP to that kind (`pipChoices` in `pip.ts`, then `pinPip`); with several people of that kind it steps through them, then back to auto. Me has no pin. No sub label (Charles didn't want the text).
 - `split/PipPin.tsx` is still loaded but draws nothing: `startPins` maps `TilePin`, `InlinePin` and `Marker` to an empty component so pins already mounted from older copies go away, and the jsx hooks for tile pins and maximize markers are no longer installed.
 - Learned along the way: Discord's maximize hides through a Reanimated style (`controlsHidden` is a shared value), so its JS props never change on toggle, and the JS thread lags 200-650ms behind Discord's controls during taps.
 
@@ -118,6 +121,7 @@ Details for `split/`:
 - Discord moves the container about 24dp when the controls show or hide. Tiles move with it on purpose (that's Discord's own motion). Rest positions are kept per channel, screen size and mode, separately for controls shown and hidden. The origin is the hidden rest; before that's known it's the shown rest plus the learned shift. Samples within 0.9s of a controls or call-state change are skipped.
 - Safe area insets come from every probe (`onInsets`), so rotation updates them. Landscape needs them for the nav bar side.
 - Polling and measuring pause while Discord is in the background.
+- What the fight recorder showed (Oct 4): controls show/hide causes no fights. Every fight is Discord putting all tiles back to its own grid from the UI thread (never through JS, so it can't be blocked) when the call screen comes back from PiP/background or finishes its open/morph animation. So the poll speeds up to 33ms for 3s when the app comes back to the front (`AppState` listener), when split turns on, and for 1.5s after any reset. The debug lists Discord's grid/layout files to look for the layout code itself.
 - Tile fights are recorded in `split/fight.ts` (kept on `globalThis.__cheeseburgerTileLog`, so updates don't wipe it): every write of ours, every Discord write we catch (`value` setter, `set()`, `modify`) with a short Discord stack, every reset the poll notices with "written through js" or "never saw the write" (a UI-thread write), plus controls, call state, container, origin, target and screen changes. The report shows the last 80 events and up to 3 fights with the 30 events before each.
 
 ## Debugging workflow

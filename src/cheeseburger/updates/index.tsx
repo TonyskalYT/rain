@@ -184,8 +184,17 @@ async function syncCheeseburger(): Promise<"updated" | "current" | "failed"> {
     }
 }
 
+function hexColor(s: string): string | null {
+    const m = /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(s.trim());
+    if (!m) return null;
+    let h = m[1].toLowerCase();
+    if (h.length <= 4) h = [...h].map(c => c + c).join("");
+    const a = h.length === 8 ? Math.round(parseInt(h.slice(6), 16) / 255 * 100) / 100 : 1;
+    return a >= 1 ? `#${h.slice(0, 6)}` : `#${h.slice(0, 6)}/${a}`;
+}
+
 const norm = (v: any): any => {
-    if (typeof v === "string") return v.toLowerCase();
+    if (typeof v === "string") return hexColor(v) ?? v.toLowerCase();
     if (Array.isArray(v)) return v.slice(0, 2).map(norm);
     if (v && typeof v === "object") return Object.fromEntries(Object.keys(v).sort().map(k => [k, norm(v[k])]));
     return v;

@@ -164,7 +164,6 @@ export function ArrangeList() {
                         <DragArea index={i} hold onStart={start} onMove={move} onEnd={end}>
                             <TableRow
                                 label={LABELS[kind]}
-                                subLabel={pin?.current ? `pip locked to ${pin.current.label}` : undefined}
                                 icon={<DragArea index={i} hold={false} onStart={start} onMove={move} onEnd={end}><Handle /></DragArea>}
                                 trailing={
                                     <View style={{ flexDirection: "row", gap: 8 }}>

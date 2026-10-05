@@ -376,6 +376,14 @@ function dataShape(value: any, depth: number): string {
 function layoutShape(props: any) {
     const descriptor = Object.getOwnPropertyDescriptor(props, "layout");
     if (!descriptor) return "absent";
+    const fn = descriptor.value;
+    if (typeof fn === "function") {
+        let statics = "";
+        try {
+            statics = Object.getOwnPropertyNames(fn).filter(k => !["length", "name", "prototype", "caller", "arguments"].includes(k)).slice(0, 8).join(",");
+        } catch { }
+        return `function ${fn.name || "anonymous"}${statics ? ` {${statics}}` : ""}${typeof fn.duration === "function" && typeof fn.build === "function" ? " (reanimated transition)" : ""}`;
+    }
     return Object.prototype.hasOwnProperty.call(descriptor, "value") ? dataShape(descriptor.value, 2) : "accessor";
 }
 
@@ -933,6 +941,7 @@ function applyLayout() {
                 const line = `${t.kind} reset to ${box(cur)}${native && near(cur, native) ? " (discord's own layout)" : ""}, ${js ? "written through js" : "never saw the write"}, ${lastWrite.has(t.coords) ? `${now - lastWrite.get(t.coords)!}ms after ours` : "never placed"}`;
                 ev(line);
                 noteFight(line);
+                hurry(1500);
                 if (isCoords(cur) && !(written.get(t.coords) ?? []).some(w => near(cur, w))) intended.set(t.coords, { ...cur });
                 burstUntil = now + 3000;
             }
@@ -943,13 +952,39 @@ function applyLayout() {
 
 const safeApply = safe("split layout", applyLayout);
 
+let fastUntil = 0;
+let polling = false;
+let appSub: { remove(): void; } | null = null;
+let lastApp = "";
+
 function poll() {
     pollTimer = null;
     if (!active || !mine()) return;
     const awake = AppState.currentState === "active";
-    if (awake) safeApply();
-    pollTimer = setTimeout(safe("split poll", poll), awake ? 100 : 1000);
+    if (awake) {
+        polling = true;
+        try {
+            safeApply();
+        } finally {
+            polling = false;
+        }
+    }
+    pollTimer = setTimeout(safe("split poll", poll), awake ? Date.now() < fastUntil ? 33 : 100 : 1000);
 }
+
+function hurry(ms: number) {
+    fastUntil = Math.max(fastUntil, Date.now() + ms);
+    if (polling || !active || !mine()) return;
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = setTimeout(safe("split poll", poll), 0);
+}
+
+const onAppState = safe("split app state", (next: string) => {
+    if (next === lastApp) return;
+    lastApp = next;
+    ev(`app ${next}`);
+    if (next === "active") hurry(3000);
+});
 
 export function kickTiles() {
     const now = Date.now();
@@ -1183,10 +1218,21 @@ export function setTilesActive(v: boolean, handoff = false) {
         shared.owner = copy;
         resolveOrigin();
         burstUntil = Date.now() + 3000;
+        if (!appSub) {
+            try {
+                appSub = AppState.addEventListener?.("change", onAppState) ?? null;
+            } catch { }
+        }
+        lastApp = AppState.currentState;
+        hurry(3000);
         if (!pollTimer) poll();
     } else {
         if (pollTimer) clearTimeout(pollTimer);
         pollTimer = null;
+        try {
+            appSub?.remove();
+        } catch { }
+        appSub = null;
         resetTileMeasurements();
         for (const a of aspects.values()) {
             if (a.timer) clearTimeout(a.timer);
@@ -1221,6 +1267,25 @@ export function moveKind(kind: TileKind, dir: -1 | 1) {
     safeApply();
 }
 
+function discordLayoutModules(): string[] {
+    const out: string[] = [];
+    const mods: any = (window as any).modules ?? {};
+    for (const id of Object.keys(mods)) {
+        const p = mods[id]?.__filePath;
+        if (typeof p !== "string" || !/(?:voice_panel|video_calls|calls)\//.test(p) || !/grid|layout|tile|coords|position/i.test(p)) continue;
+        let keys = "not loaded";
+        try {
+            if (mods[id].isInitialized) {
+                const e = mods[id].publicModule?.exports;
+                keys = e && typeof e === "object" ? Object.keys(e).slice(0, 8).join(",") : typeof e;
+            }
+        } catch { }
+        out.push(`  ${p.replace(/^modules\//, "")} [${keys}]`);
+        if (out.length >= 30) break;
+    }
+    return out.length ? ["discord layout files:", ...out] : ["discord layout files: none found"];
+}
+
 export function tilesDebug(): string[] {
     const list = orderedTiles();
     return [
@@ -1242,6 +1307,8 @@ export function tilesDebug(): string[] {
         ...(moves.length ? ["last moves:", ...moves.map(m => `  ${m}`)] : []),
         ...(frameLog.length ? ["area changes:", ...frameLog.map(m => `  ${m}`)] : []),
         ...fightDebug(),
+        `burst polling: ${Date.now() < fastUntil ? "on" : "off"}, app ${AppState.currentState}`,
+        ...discordLayoutModules(),
         `order setting: ${currentOrder().join(" > ")}`,
         `video sizes: ${[...videoSizes.entries()].map(([id, s]) => `${id}=${s.w}x${s.h}${aspects.has(id) ? ` (${aspects.get(id)!.value.toFixed(2)}${aspects.get(id)!.pending ? ` -> ${aspects.get(id)!.pending!.toFixed(2)}` : ""})` : ""}`).join(", ") || "none yet"}`,
         ...[...list, ...voice].map(t => {
