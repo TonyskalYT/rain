@@ -10,6 +10,7 @@ interface SplitViewSettings {
     pinLab: boolean;
     labOn: boolean;
     focusWhenShown: boolean | null;
+    uiKeeper: string | null;
 }
 
 export const {
@@ -25,4 +26,5 @@ export const {
     pinLab: true,
     labOn: false,
     focusWhenShown: null,
+    uiKeeper: null,
 });

@@ -7,6 +7,7 @@ import { AppState, Dimensions, StatusBar } from "react-native";
 import { caught, safe } from "../crash";
 import { ev, fightDebug, noteFight, noteReset, noteWriter } from "./fight";
 import { splitRects, stageRects } from "./geometry";
+import { keeperClear, keeperDebug, keeperSync, keeperWanted } from "./keeper";
 import { anyTileProbes, type ContainerSample, hasTileProbe, hasToolbarRef, measured, measureToolbarNow, onInsets, probeDebug, resetTileMeasurements, sampleContainer, toolbarKnown, viewportKey } from "./probe";
 import { splitViewSettings } from "./storage";
 
@@ -914,14 +915,16 @@ function applyLayout() {
     const rects = computeRects(list);
     const now = Date.now();
     const inUse = new Set(all.map(t => t.coords));
+    const restores: [any, any][] = [];
     for (const sv of touched) {
         if (inUse.has(sv)) continue;
-        const o = intended.get(sv);
+        const o = nativeOf(sv);
         targets.delete(sv);
-        if (o) writeCoords(sv, { ...readCoords(sv), zIndex: 0, ...o });
+        if (o) restores.push([sv, o]);
         intended.delete(sv);
         touched.delete(sv);
     }
+    const plan: { t: Tile; r: Rect; prev?: Rect; }[] = [];
     for (const t of all) {
         const r = rects.get(t.key);
         if (!r || !t.coords) continue;
@@ -931,6 +934,11 @@ function applyLayout() {
         targets.set(t.coords, r);
         touched.add(t.coords);
         guard(t.coords);
+        plan.push({ t, r, prev });
+    }
+    keeperSync(plan.map(p => [p.t.coords, p.r]));
+    for (const [sv, o] of restores) writeCoords(sv, { ...readCoords(sv), zIndex: 0, ...o });
+    for (const { t, r, prev } of plan) {
         const cur = current.get(t.coords);
         if (cur && (!near(cur, r) || (cur.zIndex ?? 1) !== (r.z ?? 1))) {
             if (prev && near(prev, r)) {
@@ -969,7 +977,7 @@ function poll() {
             polling = false;
         }
     }
-    pollTimer = setTimeout(safe("split poll", poll), awake ? Date.now() < fastUntil ? 33 : 100 : 1000);
+    pollTimer = setTimeout(safe("split poll", poll), awake ? Date.now() < fastUntil ? 16 : 100 : 1000);
 }
 
 function hurry(ms: number) {
@@ -1003,10 +1011,14 @@ function scheduleApply() {
     }), 50);
 }
 
+const nativeOf = (sv: any) => keeperWanted(sv) ?? intended.get(sv);
+
 function restoreAll() {
     if (touched.size) ev("gave tiles back to discord");
+    const wanted = new Map([...touched].map(sv => [sv, nativeOf(sv)]));
+    keeperClear();
     for (const sv of touched) {
-        const o = intended.get(sv);
+        const o = wanted.get(sv);
         targets.delete(sv);
         if (o) writeCoords(sv, { ...readCoords(sv), zIndex: 0, ...o });
         intended.delete(sv);
@@ -1016,10 +1028,12 @@ function restoreAll() {
 
 function releaseForCalibration() {
     if (touched.size) ev("gave tiles back to discord to measure");
+    const wanted = new Map([...touched].map(sv => [sv, nativeOf(sv)]));
+    keeperClear();
     for (const sv of touched) {
         const current = readCoords(sv);
         const target = targets.get(sv);
-        const native = intended.get(sv);
+        const native = wanted.get(sv);
         targets.delete(sv);
         if (native && (!target || near(current ?? {}, target))) writeCoords(sv, { ...current, zIndex: 0, ...native });
         intended.delete(sv);
@@ -1241,6 +1255,7 @@ export function setTilesActive(v: boolean, handoff = false) {
         }
         try {
             if (!handoff && mine()) restoreAll();
+            else keeperClear();
         } catch (e) {
             caught("split restore", e);
         }
@@ -1306,6 +1321,7 @@ export function tilesDebug(): string[] {
         ...(Dimensions.get("window").width > Dimensions.get("window").height ? [`landscape main: ${list.find(t => t.key === stageMain)?.kind ?? "none"}`] : []),
         ...(moves.length ? ["last moves:", ...moves.map(m => `  ${m}`)] : []),
         ...(frameLog.length ? ["area changes:", ...frameLog.map(m => `  ${m}`)] : []),
+        keeperDebug(),
         ...fightDebug(),
         `burst polling: ${Date.now() < fastUntil ? "on" : "off"}, app ${AppState.currentState}`,
         ...discordLayoutModules(),

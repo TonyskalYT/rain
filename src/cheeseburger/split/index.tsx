@@ -6,6 +6,7 @@ import { React } from "@metro/common";
 
 import { safe } from "../crash";
 import { useToolbar } from "../toolbar";
+import { keeperStop } from "./keeper";
 import { isFullscreenSplit, isLandscapeAuto, isSplitActive, resumeSplit, startLayoutPatches, stopLayoutPatches } from "./layout";
 import { isPipRender, startPip, stopPip } from "./pip";
 import { startPins, stopPins } from "./PipPin";
@@ -78,6 +79,7 @@ export default {
         stopPins();
         stopPip();
         stopLayoutPatches(swapping);
+        keeperStop();
         for (const u of unpatches.splice(0)) u();
     },
 };
