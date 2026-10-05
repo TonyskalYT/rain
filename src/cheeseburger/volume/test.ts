@@ -355,6 +355,8 @@ async function runMicTest() {
 
 interface Source { conn: any; userId: string; level: number; }
 
+const STEPS: [number, string][] = [[0.5, "90%"], [2, "200%"], [8, "400%"]];
+
 function connections(): any[] {
     const out: any[] = [];
     try {
@@ -413,13 +415,13 @@ async function runListen(lines: string[], stop: (text: string, toast: string) =>
     showToast("looking for sound...");
     const found = await findSound(conns);
     lines.push(`  sound: ${found.slice(0, 4).map(s => `${context(s.conn)} ${shortId(s.userId)} ${short(s.level)}`).join(", ") || "none"}`);
-    const src = found.find(s => context(s.conn) === "default" && s.level >= 0.02) ?? found[0];
-    if (!src || src.level < 0.02) return stop("nothing playing", "nobody's making sound, someone has to talk (a music bot works too)");
+    const src = found.find(s => context(s.conn) === "default");
+    if (!src || src.level < 0.02) return stop("nobody talking", "nobody's talking, start it while someone talks (a music bot works too)");
     const id = connId(src.conn);
     if (id == null) return stop(`connection id ${String(src.conn?.mediaEngineConnectionId)} isn't a number`, "can't reach discord's audio engine");
     const ctx = context(src.conn);
     lines.push(`  testing ${ctx} ${shortId(src.userId)} on connection ${String(src.conn.mediaEngineConnectionId)} (${id})`);
-    showToast(`listen to ${nameOf(src)}, flipping 200% and 400% every 2s`);
+    showToast(`listen to ${nameOf(src)}: 90%, 200%, 400%, each 2s, 3 times`);
     const restore = () => {
         let current = 100;
         try {
@@ -433,12 +435,12 @@ async function runListen(lines: string[], stop: (text: string, toast: string) =>
     };
     let step = 0;
     const tick = safe("listen test", () => {
-        if (step >= 6) {
+        if (step >= STEPS.length * 3) {
             restore();
-            stop("done, flipped 6 times", "listen test done");
+            stop("done, 3 rounds", "done, did 400% get louder than 200%?");
             return;
         }
-        const v = step % 2 ? 8 : 2;
+        const [v, label] = STEPS[step % STEPS.length];
         try {
             native.connectionInstanceSetLocalVolume(id, src.userId, v);
         } catch (e) {
@@ -446,7 +448,7 @@ async function runListen(lines: string[], stop: (text: string, toast: string) =>
             stop(`couldn't set x${v}: ${String((e as any)?.message ?? e).slice(0, 120)}`, "couldn't change their volume");
             return;
         }
-        const at = lines.push(`  ${stamp()} ${v === 8 ? "400%" : "200%"} (x${v})`) - 1;
+        const at = lines.push(`  ${stamp()} ${label} (x${v})`) - 1;
         fromConnection(src.conn).then(safe("listen test level", (raw: any) => {
             const now = inboundLevels(src.conn, raw).find(x => x.userId === src.userId);
             if (now) lines[at] += `, sound ${short(now.level)}`;
