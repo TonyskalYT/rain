@@ -18,6 +18,8 @@ import { note, short, trail } from "./trail";
 import VolumeLabel, { emitSliderValue } from "./VolumeLabel";
 
 const DISCORD_MAX = 200;
+const BOOSTABLE = new Set(["default", "stream"]);
+const raised: Record<string, number> = {};
 const unpatches: (() => unknown)[] = [];
 let patchedProtos = new WeakSet<object>();
 
@@ -161,7 +163,7 @@ function modulePaths(): string[] {
 
 export function volumeDebug(): string[] {
     const store = getMediaEngineStore();
-    const lines: string[] = [`max ${maxPercent()}%, boosted: ${Object.entries(volumeBoostSettings.boosted ?? {}).map(([k, v]) => `${k.split(":")[0]} ${short(k.split(":")[1])}=${v}`).join(", ") || "none"}`];
+    const lines: string[] = [`sliders raised: ${Object.entries(raised).map(([c, n]) => `${c} ${n}`).join(", ") || "none yet"}`, `max ${maxPercent()}%, boosted: ${Object.entries(volumeBoostSettings.boosted ?? {}).map(([k, v]) => `${k.split(":")[0]} ${short(k.split(":")[1])}=${v}`).join(", ") || "none"}`];
     const users = [...new Set(Object.keys(volumeBoostSettings.boosted ?? {}).map(k => k.split(":")[1]))];
     for (const u of users) {
         const safe = (ctx: string) => {
@@ -317,8 +319,9 @@ function jsxBefore(args: any[]) {
     if (props.maximumValue !== DISCORD_MAX || typeof props.onValueChange !== "function") return;
 
     const target = sliderTarget(props.value) ?? sliderTargets.get(props.onValueChange);
-    if (!target || target.context !== "default") return;
+    if (!target || !BOOSTABLE.has(target.context)) return;
     sliderTargets.set(props.onValueChange, target);
+    raised[target.context] = (raised[target.context] ?? 0) + 1;
 
     const next: any = {
         ...props,
@@ -428,7 +431,7 @@ export default {
                 const [userId, volume, context = "default"] = args;
                 if (typeof userId !== "string" || typeof volume !== "number") return;
 
-                if (context !== "default") {
+                if (!BOOSTABLE.has(context)) {
                     if (getBoost(userId, context)) setBoost(userId, null, context);
                     if (volume > DISCORD_MAX) {
                         args[1] = DISCORD_MAX;

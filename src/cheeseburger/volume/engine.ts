@@ -21,6 +21,7 @@ const samples = new Map<string, Sample[]>();
 const learned = new Map<string, number>();
 const nativeCalls = new Map<string, Capture[]>();
 let lastLocal = "none yet";
+let mergeShapes: string[] = [];
 let bypassed = 0;
 let unmatched = 0;
 
@@ -64,7 +65,10 @@ function volumeSlot(name: string, a: any[], t: Transaction): number | null {
 
 function adjust(label: string, name: string, a: any[]): any[] {
     const t = current;
-    if (!t) return a;
+    if (!t) {
+        if (label === "native" && PER_USER.test(name)) note(`direct native.${name}(${a.map(short).join(",")})`);
+        return a;
+    }
     const slot = volumeSlot(name, a, t);
     const shown = a.map(short).join(",");
     if (slot == null) {
@@ -141,7 +145,41 @@ export function hookEngine() {
             hooks.push({ label, obj, name, orig, wrapped, ok });
             if (ok) installed.add(name);
         }
+        const merge = "connectionInstanceMergeUsers";
+        if (label === "native" && !installed.has(merge) && typeof obj[merge] === "function") {
+            const orig = obj[merge];
+            const wrapped = function (this: any, ...a: any[]) {
+                try {
+                    watchMerge(a);
+                } catch { }
+                return orig.apply(this, a);
+            };
+            try {
+                obj[merge] = wrapped;
+            } catch { }
+            const ok = obj[merge] === wrapped;
+            hooks.push({ label, obj, name: merge, orig, wrapped, ok });
+            if (ok) installed.add(merge);
+        }
     }
+}
+
+function watchMerge(a: any[]) {
+    let users: any = a[1];
+    if (typeof users === "string") {
+        try {
+            users = JSON.parse(users);
+        } catch { }
+    }
+    const list: any[] = Array.isArray(users) ? users : users && typeof users === "object" ? Object.values(users) : [];
+    const keys = [...new Set(list.flatMap(u => (u && typeof u === "object" ? Object.keys(u) : [])))].sort().join(",");
+    const sig = `${a.length} args, ${typeof a[1]}${keys ? ` {${keys}}` : ""}`;
+    if (!mergeShapes.includes(sig)) {
+        mergeShapes.push(sig);
+        if (mergeShapes.length > 4) mergeShapes.shift();
+    }
+    const volumes = list.filter(u => typeof u?.volume === "number").map(u => `${short(String(u.id ?? u.userId ?? "?"))}=${short(u.volume)}`);
+    if (volumes.length) note(`native.mergeUsers(${short(a[0])}) volumes ${volumes.join(" ")}`);
 }
 
 function remoteSsrcs(conn: any, userId: string): any[] {
@@ -187,6 +225,7 @@ export function unhookEngine() {
     learned.clear();
     nativeCalls.clear();
     lastLocal = "none yet";
+    mergeShapes = [];
     unmatched = bypassed = 0;
 }
 
@@ -196,6 +235,7 @@ export function engineDebug(): string[] {
         `per-user hooks: ${hooks.map(h => `${h.label}.${h.name}${h.ok ? "" : " (blocked)"}`).join(", ") || "none"}`,
         `gain mappings: ${[...learned.entries()].map(([k, r]) => `${k} x${short(r)}`).join(", ") || "none"}, JS cap overrides: ${bypassed}`,
         `last local: ${lastLocal}; unmatched calls: ${unmatched}`,
+        `merge users: ${mergeShapes.join(" | ") || "none seen"}`,
         ...[...nativeCalls.values()].flatMap(captures => captures.map(c => `${c.line}; setter returned ${c.returned ?? "not captured"}`)),
         "output verification: JS/native-boundary arguments only; speaker output has not been measured",
     ];
