@@ -79,8 +79,22 @@ function Handle() {
     );
 }
 
+function pinFor(kind: TileKind) {
+    const choices = pipChoices().filter(c => c.kind === kind);
+    const pinned = pinnedPip();
+    const at = choices.findIndex(c => c.id === pinned);
+    return {
+        choices,
+        current: at >= 0 ? choices[at] : null,
+        next: () => pinPip(at < 0 ? choices[0]?.id ?? null : choices[at + 1]?.id ?? null),
+    };
+}
+
 export function ArrangeList() {
     useSplitViewSettings(s => s.order);
+    const [, repaint] = React.useReducer((n: number) => n + 1, 0);
+    React.useEffect(() => onPinChange(repaint), []);
+    const pinIcon = firstAsset("PinIcon", "PushPinIcon", "PictureInPictureIcon", "ic_pip");
     const order = currentOrder();
     const [drag, setDrag] = React.useState<Drag | null>(null);
     const dragRef = React.useRef<Drag | null>(null);
@@ -132,6 +146,7 @@ export function ArrangeList() {
         <TableRowGroup title="Top to bottom">
             {order.map((kind, i) => {
                 const lifted = drag?.from === i;
+                const pin = kind === "me" ? null : pinFor(kind);
                 return (
                     <Animated.View
                         key={kind}
@@ -149,9 +164,13 @@ export function ArrangeList() {
                         <DragArea index={i} hold onStart={start} onMove={move} onEnd={end}>
                             <TableRow
                                 label={LABELS[kind]}
+                                subLabel={pin?.current ? `pip locked to ${pin.current.label}` : undefined}
                                 icon={<DragArea index={i} hold={false} onStart={start} onMove={move} onEnd={end}><Handle /></DragArea>}
                                 trailing={
                                     <View style={{ flexDirection: "row", gap: 8 }}>
+                                        {pin && pin.choices.length > 0 && pinIcon !== undefined && (
+                                            <IconButton size="sm" variant={pin.current ? "primary" : "secondary"} icon={pinIcon} onPress={safe("arrange pin", () => pin.next())} />
+                                        )}
                                         <IconButton size="sm" variant="secondary" icon={upIcon} disabled={i === 0} onPress={safe("arrange up", () => moveKind(kind, -1))} />
                                         <IconButton size="sm" variant="secondary" icon={downIcon} disabled={i === order.length - 1} onPress={safe("arrange down", () => moveKind(kind, 1))} />
                                     </View>
@@ -161,25 +180,6 @@ export function ArrangeList() {
                     </Animated.View>
                 );
             })}
-        </TableRowGroup>
-    );
-}
-
-function PipList() {
-    const [, force] = React.useReducer((n: number) => n + 1, 0);
-    React.useEffect(() => onPinChange(force), []);
-    const choices = pipChoices();
-    const pinned = pinnedPip();
-    const check = firstAsset("CheckmarkLargeIcon", "CheckmarkSmallIcon", "CheckIcon", "ic_check");
-    const mark = (on: boolean) => on ? (check !== undefined ? <TableRow.Icon source={check} /> : <TableRow.TrailingText text="on" />) : undefined;
-    const auto = !pinned || !choices.some(c => c.id === pinned);
-    if (!choices.length) return null;
-    return (
-        <TableRowGroup title="PiP shows">
-            <TableRow label="auto" trailing={mark(auto)} onPress={safe("arrange pip auto", () => pinPip(null))} />
-            {choices.map(c => (
-                <TableRow key={c.id} label={c.label} trailing={mark(c.id === pinned)} onPress={safe("arrange pip pick", () => pinPip(c.id === pinned ? null : c.id))} />
-            ))}
         </TableRowGroup>
     );
 }
@@ -194,7 +194,6 @@ export function ArrangeSheet() {
             <BottomSheetTitleHeader title="Arrange" />
             <View style={{ paddingVertical: 16, gap: 16 }}>
                 <ArrangeList />
-                <PipList />
                 {rotateOn && (
                     <TableRowGroup title="Screen">
                         <TableRow label={isLandscapeLocked() ? "Portrait" : "Landscape"} onPress={safe("arrange rotate", () => toggleLandscape())} />

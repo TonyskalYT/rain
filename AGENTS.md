@@ -108,7 +108,7 @@ Details for `split/`:
 - Real pitch, robot or echo effects aren't possible: Discord's Android engine has no audio processing the mod can reach.
 
 **Picking the PiP**
-- Charles gave up on pin buttons drawn on tiles. The PiP is picked in the Arrange sheet (hold the split button): "PiP shows" lists auto plus everyone else's screen and camera (`pipChoices` in `pip.ts`), and sets the same pin (`pinPip`).
+- Charles gave up on pin buttons drawn on tiles. The PiP is picked in the Arrange sheet (hold the split button): the Screen and Them rows have a pin button next to the up/down arrows. Tapping it locks the PiP to that kind (`pipChoices` in `pip.ts`, then `pinPip`); with several people of that kind it steps through them, then back to auto. The row's sub label says who it's locked to. Me has no pin.
 - `split/PipPin.tsx` is still loaded but draws nothing: `startPins` maps `TilePin`, `InlinePin` and `Marker` to an empty component so pins already mounted from older copies go away, and the jsx hooks for tile pins and maximize markers are no longer installed.
 - Learned along the way: Discord's maximize hides through a Reanimated style (`controlsHidden` is a shared value), so its JS props never change on toggle, and the JS thread lags 200-650ms behind Discord's controls during taps.
 
