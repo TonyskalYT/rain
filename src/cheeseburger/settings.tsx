@@ -109,7 +109,7 @@ export default function Settings() {
                                 trailing={boosted ? <TableRow.TrailingText text={String(boosted)} /> : undefined}
                                 onPress={() => volume.updateSettings({ boosted: {} })}
                             />
-                            <TableRow label="Test boost" subLabel="someone has to talk, takes 10s" onPress={() => startVolumeTest("boost")} />
+                            <TableRow label="Test boost" subLabel="someone has to talk, takes 15s" onPress={() => startVolumeTest("boost")} />
                         </>
                     )}
                     <TableSwitchRow
@@ -131,7 +131,7 @@ export default function Settings() {
                         value={s.voice !== false}
                         onValueChange={(v: boolean) => setFeature("voice", v)}
                     />
-                    {s.voice !== false && <TableRow label="Test mic boost" subLabel="talk for 10s" onPress={() => startVolumeTest("mic")} />}
+                    {s.voice !== false && <TableRow label="Test mic boost" subLabel="talk for 15s" onPress={() => startVolumeTest("mic")} />}
                 </TableRowGroup>
 
                 <TableRowGroup title="Video">

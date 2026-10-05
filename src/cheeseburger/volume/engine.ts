@@ -154,9 +154,15 @@ function remoteSsrcs(conn: any, userId: string): any[] {
     return out;
 }
 
+function engineId(raw: any): any {
+    if (typeof raw === "number") return raw;
+    const m = /(\d+)\s*$/.exec(String(raw ?? ""));
+    return m ? Number(m[1]) : raw;
+}
+
 export function traceLocalVolume(conn: any, userId: string, want: number, context: string, call: () => any): any {
     const previous = current;
-    const t: Transaction = { userId, want, context, connectionId: conn?.mediaEngineConnectionId, ssrcs: remoteSsrcs(conn, userId), matches: 0 };
+    const t: Transaction = { userId, want, context, connectionId: engineId(conn?.mediaEngineConnectionId), ssrcs: remoteSsrcs(conn, userId), matches: 0 };
     current = t;
     try {
         return call();

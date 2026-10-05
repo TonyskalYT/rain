@@ -16,7 +16,7 @@ const WANTED = /level|energy|duration|volume|gain|power|rms|peak|speech|voice|lo
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(safe("volume test wait", () => resolve()), ms));
 const stamp = () => new Date().toISOString().slice(11, 19);
-const pct = (v: number) => `${Math.round(v * 100)}%`;
+const times = (v: number) => `x${short(v)}`;
 const shortId = (v: any) => (typeof v === "string" && v.length > 8 ? `…${v.slice(-4)}` : String(v));
 
 function engine(): any {
@@ -77,9 +77,16 @@ function viaPromiseOrCallback(call: (cb: (v: any) => void) => any, done: (v: any
 
 const fromConnection = (conn: any) => settle<any>(done => viaPromiseOrCallback(cb => conn.getStats(cb), done));
 
+function connId(conn: any): number | null {
+    const raw = conn?.mediaEngineConnectionId;
+    if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+    const m = /(\d+)\s*$/.exec(String(raw ?? ""));
+    return m ? Number(m[1]) : null;
+}
+
 function fromNative(conn: any): Promise<any> {
     const native = nativeModule();
-    const id = conn?.mediaEngineConnectionId;
+    const id = connId(conn);
     if (typeof native?.connectionInstanceGetStats !== "function" || id == null) return Promise.resolve(null);
     return settle<any>(done => {
         try {
@@ -166,7 +173,7 @@ function pick(entries: Entry[], mode: "inbound" | "outbound", userId: string, ss
     return pool.find(e => /outbound|send|local|media-source|sender|input/i.test(e.path) || /outbound|media-source|local/i.test(String(e.obj.type ?? ""))) ?? null;
 }
 
-interface Plan { title: string; values: number[]; set: (v: number) => string | null; restore: () => void; mode: "inbound" | "outbound"; userId: string; ssrc: () => any; }
+interface Plan { failed?: string; title: string; values: number[]; set: (v: number) => string | null; restore: () => void; mode: "inbound" | "outbound"; userId: string; ssrc: () => any; }
 
 async function measure(conn: any, plan: Plan, lines: string[]): Promise<Sample[]> {
     const samples: Sample[] = [];
@@ -175,11 +182,12 @@ async function measure(conn: any, plan: Plan, lines: string[]): Promise<Sample[]
     for (const [phase, value] of plan.values.entries()) {
         const err = plan.set(value);
         if (err) {
-            lines.push(`  couldn't set ${pct(value)}: ${err}`);
+            lines.push(`  couldn't set ${times(value)}: ${err}`);
+            plan.failed = err;
             return samples;
         }
-        await sleep(450);
-        for (let i = 0; i < 5; i++) {
+        await sleep(400);
+        for (let i = 0; i < 6; i++) {
             let hit: Entry | null = null;
             const order: ("connection" | "native")[] = source ? [source] : ["connection", "native"];
             for (const which of order) {
@@ -210,76 +218,95 @@ async function measure(conn: any, plan: Plan, lines: string[]): Promise<Sample[]
                 }
                 samples.push({ value, phase, fields: numbers(hit.obj), at: Date.now() });
             }
-            await sleep(200);
+            await sleep(150);
         }
     }
     if (!entry) lines.push(`  no ${plan.mode === "inbound" ? "incoming audio for that person" : "outgoing audio"} with a level in either stats source`);
     return samples;
 }
 
-function summarize(samples: Sample[], values: number[], lines: string[]): { ratioLow: number | null; ratioHigh: number | null; field: string | null; quiet: boolean; } {
-    const distinct = [...new Set(values)].sort((a, b) => a - b);
-    const fields = [...new Set(samples.flatMap(s => Object.keys(s.fields)))].filter(f => WANTED.test(f));
-    const durationField = fields.find(f => /duration/i.test(f));
-    const results: Record<string, Record<number, number>> = {};
-    for (const f of fields) {
-        const cumulative = /total|energy/i.test(f) && !/duration/i.test(f);
-        if (/duration/i.test(f)) continue;
-        const perValue: Record<number, number[]> = {};
-        for (const phase of [...new Set(samples.map(s => s.phase))]) {
-            const group = samples.filter(s => s.phase === phase && typeof s.fields[f] === "number");
-            if (!group.length) continue;
-            let stat: number | null = null;
-            if (cumulative) {
-                let e = 0;
-                let d = 0;
-                for (let i = 1; i < group.length; i++) {
-                    e += group[i].fields[f] - group[i - 1].fields[f];
-                    const dd = durationField ? group[i].fields[durationField] - group[i - 1].fields[durationField] : (group[i].at - group[i - 1].at) / 1000;
-                    d += Number.isFinite(dd) ? dd : 0;
-                }
-                if (d > 0) stat = e / d;
-            } else {
-                const sorted = group.map(s => s.fields[f]).sort((a, b) => b - a);
-                const top = sorted.slice(0, Math.max(1, Math.ceil(sorted.length / 2)));
-                stat = top.reduce((a, b) => a + b, 0) / top.length;
-            }
-            if (stat != null && Number.isFinite(stat)) (perValue[group[0].value] ??= []).push(stat);
-        }
-        const per: Record<number, number> = {};
-        for (const v of distinct) if (perValue[v]?.length) per[v] = perValue[v].reduce((a, b) => a + b, 0) / perValue[v].length;
-        results[f] = per;
-        lines.push(`  ${f}${cumulative ? " (per second)" : ""}: ${distinct.map(v => `${pct(v)} ${per[v] == null ? "-" : short(per[v])}`).join(", ")}`);
-    }
-    const usable = Object.keys(results);
-    const preferred = ["totalAudioEnergy", "audioLevel", "audio_level", "level"].map(p => usable.find(f => f === p || f.endsWith(`.${p}`))).find(Boolean) ?? usable.find(f => /level|energy/i.test(f)) ?? null;
-    if (!preferred) return { ratioLow: null, ratioHigh: null, field: null, quiet: false };
-    const per = results[preferred];
-    const [lo, mid, hi] = [distinct[0], distinct[1], distinct[distinct.length - 1]];
-    const energy = /energy/i.test(preferred);
-    const amp = (x: number | undefined) => (x == null ? null : energy ? Math.sqrt(Math.max(0, x)) : x);
-    const a = amp(per[lo]);
-    const b = amp(per[mid]);
-    const c = amp(per[hi]);
-    const quiet = [a, b, c].every(x => x == null || Math.abs(x) < 1e-4);
-    lines.push(`  measured with ${preferred}${energy ? " (as loudness)" : ""}`);
-    return {
-        ratioLow: a && b && a > 0 ? b / a : null,
-        ratioHigh: b && c && b > 0 ? c / b : null,
-        field: preferred,
-        quiet,
-    };
+function rank(f: string) {
+    if (/(^|\.)audioLevel$/i.test(f)) return 0;
+    if (/level/i.test(f) && !/total|energy|duration/i.test(f)) return 1;
+    if (/energy/i.test(f) && !/duration/i.test(f)) return 2;
+    return 3;
 }
 
-function verdict(kind: "boost" | "mic", r: ReturnType<typeof summarize>, high: number, mid: number, low: number): string {
+type Round = [number | null, number | null, number | null];
+interface Levels { field: string | null; quiet: boolean; rounds: Round[]; }
+
+function phaseStat(group: Sample[], f: string, durationField: string | undefined, cumulative: boolean): number | null {
+    if (cumulative) {
+        let e = 0;
+        let d = 0;
+        for (let i = 1; i < group.length; i++) {
+            e += group[i].fields[f] - group[i - 1].fields[f];
+            const dd = durationField ? group[i].fields[durationField] - group[i - 1].fields[durationField] : (group[i].at - group[i - 1].at) / 1000;
+            d += Number.isFinite(dd) ? dd : 0;
+        }
+        return d > 0 ? e / d : null;
+    }
+    const sorted = group.map(s => s.fields[f]).sort((a, b) => b - a);
+    const top = sorted.slice(0, Math.max(1, Math.ceil(sorted.length / 2)));
+    return top.reduce((a, b) => a + b, 0) / top.length;
+}
+
+function summarize(samples: Sample[], values: number[], lines: string[]): Levels {
+    const fields = [...new Set(samples.flatMap(s => Object.keys(s.fields)))].filter(f => WANTED.test(f));
+    const durationField = fields.find(f => /duration/i.test(f));
+    const byPhase: Record<string, (number | null)[]> = {};
+    for (const f of fields) {
+        if (/duration/i.test(f)) continue;
+        const cumulative = /total|energy/i.test(f);
+        byPhase[f] = values.map((_, phase) => {
+            const group = samples.filter(s => s.phase === phase && typeof s.fields[f] === "number");
+            const stat = group.length ? phaseStat(group, f, durationField, cumulative) : null;
+            return stat != null && Number.isFinite(stat) ? stat : null;
+        });
+        lines.push(`  ${f}${cumulative ? " (per second)" : ""}: ${values.map((v, i) => `${times(v)} ${byPhase[f][i] == null ? "-" : short(byPhase[f][i])}`).join(", ")}`.slice(0, 400));
+    }
+    const preferred = Object.keys(byPhase).filter(f => rank(f) < 3).sort((x, y) => rank(x) - rank(y))[0] ?? null;
+    if (!preferred) return { field: null, quiet: false, rounds: [] };
+    const energy = /energy/i.test(preferred);
+    const raw = samples.map(s => s.fields[preferred]).filter((v): v is number => typeof v === "number");
+    const peak = Math.max(0, ...raw);
+    const scale = energy || peak <= 1.01 ? 1 : peak <= 9.01 && raw.every(Number.isInteger) ? 9 : 32767;
+    const amp = (x: number | null) => (x == null ? null : energy ? Math.sqrt(Math.max(0, x)) : x / scale);
+    const levels = byPhase[preferred].map(amp);
+    const rounds: Round[] = [];
+    for (let i = 0; i + 2 < levels.length; i += 3) rounds.push([levels[i], levels[i + 1], levels[i + 2]]);
+    const quiet = levels.every(x => x == null || Math.abs(x) < 1e-4);
+    lines.push(`  measured with ${preferred}${energy ? " (as loudness)" : scale !== 1 ? ` (out of ${scale})` : ""}: ${rounds.map(r => r.map(x => (x == null ? "-" : short(x))).join("/")).join(", ")}`);
+    return { field: preferred, quiet, rounds };
+}
+
+type Vote = "works" | "capped" | "loud" | "flat";
+
+function verdict(kind: "boost" | "mic", r: Levels, values: number[]): string {
+    const [lo, mid, hi] = values;
     if (!r.field) return "couldn't find audio levels in discord's stats, send a debug";
     if (r.quiet) return kind === "boost" ? "nobody talked during the test" : "no sound from your mic during the test";
-    if (r.ratioLow != null && r.ratioLow < 1.15) return `the level didn't change from ${pct(low)} to ${pct(mid)} either, so these stats can't show volume`;
-    if (r.ratioHigh == null) return "not enough samples";
-    const want = high / mid;
-    if (r.ratioHigh < 1.15) return `capped: ${pct(high)} is as loud as ${pct(mid)} (x${short(r.ratioHigh)}), discord's audio engine stops at ${pct(mid)}`;
-    if (r.ratioHigh < want * 0.6) return `partly works: ${pct(high)} is x${short(r.ratioHigh)} of ${pct(mid)} (asked for x${short(want)}), probably clipping at full scale`;
-    return `works: ${pct(high)} is x${short(r.ratioHigh)} of ${pct(mid)}`;
+    const votes: Vote[] = [];
+    const ratios: number[] = [];
+    for (const [a, b, c] of r.rounds) {
+        if (a == null || b == null || c == null || a <= 0 || b <= 0) continue;
+        const expected = Math.min(hi / mid, 0.98 / b);
+        if (expected < 1.35) votes.push("loud");
+        else if (b / a < 1.3) votes.push("flat");
+        else {
+            votes.push(c / b >= Math.sqrt(expected) ? "works" : "capped");
+            ratios.push(c / b);
+        }
+    }
+    if (!votes.length) return "not enough sound, keep talking the whole time";
+    const count = (v: Vote) => votes.filter(x => x === v).length;
+    const top = (["works", "capped", "loud", "flat"] as Vote[]).sort((x, y) => count(y) - count(x))[0];
+    if (count(top) * 2 <= votes.length) return `mixed results (${votes.join(", ")}), ${kind === "boost" ? "run it again while they keep talking" : "run it again and keep talking"}`;
+    const got = ratios.length ? short(ratios.sort((x, y) => x - y)[Math.floor(ratios.length / 2)]) : "?";
+    if (top === "loud") return `too loud to tell, ${times(mid)} already maxes out the meter, ${kind === "boost" ? "try with someone quieter" : "talk a bit quieter"}`;
+    if (top === "flat") return `the level didn't change from ${times(lo)} to ${times(mid)} either, so these stats can't show volume`;
+    if (top === "capped") return `capped at 200%: ${times(hi)} measured about the same as ${times(mid)} (x${got}), discord's android audio engine won't go higher`;
+    return `works: ${times(hi)} measured x${got} of ${times(mid)} (200%)`;
 }
 
 async function runTest(kind: "boost" | "mic") {
@@ -307,29 +334,28 @@ async function runTest(kind: "boost" | "mic") {
             finish(userId ? "can't reach discord's audio engine" : "nobody else in the call");
             return;
         }
-        const high = Math.max(4, Number(boosted?.[1] ?? 1000) / 100);
-        const id = conn.mediaEngineConnectionId;
+        const id = connId(conn);
+        if (id == null) {
+            lines.push(`boost test ${stamp()}: connection id ${String(conn.mediaEngineConnectionId)} isn't a number`);
+            finish("can't tell which call connection to test");
+            return;
+        }
         plan = {
-            title: `boost test ${stamp()} on ${shortId(userId)}, connection ${String(id)}, ssrc ${String(conn.remoteAudioSSRCs?.[userId] ?? "?")}`,
-            values: [1, 2, high, 1, 2, high],
+            title: `boost test ${stamp()} on ${shortId(userId)}, connection ${String(conn.mediaEngineConnectionId)} (${id}), ssrc ${String(conn.remoteAudioSSRCs?.[userId] ?? "?")}`,
+            values: [1, 2, 4, 1, 2, 4, 1, 2, 4],
             set: v => {
                 try {
                     native.connectionInstanceSetLocalVolume(id, userId, v);
                     return null;
                 } catch (e) {
-                    return String((e as any)?.message ?? e).slice(0, 80);
+                    return String((e as any)?.message ?? e).slice(0, 200);
                 }
             },
             restore: () => {
-                const boost = boosted ? Number(boosted[1]) : null;
-                let current = boost;
-                if (current == null) {
-                    try {
-                        current = findByStoreName("MediaEngineStore")?.getLocalVolume?.(userId, "default") ?? 100;
-                    } catch {
-                        current = 100;
-                    }
-                }
+                let current = 100;
+                try {
+                    current = findByStoreName("MediaEngineStore")?.getLocalVolume?.(userId, "default") ?? 100;
+                } catch { }
                 try {
                     conn.setLocalVolume(userId, current);
                 } catch (e) {
@@ -341,10 +367,9 @@ async function runTest(kind: "boost" | "mic") {
             ssrc: () => conn.remoteAudioSSRCs?.[userId],
         };
     } else {
-        const high = Math.max(4, micPercent() / 100);
         plan = {
-            title: `mic test ${stamp()}, connection ${String(conn.mediaEngineConnectionId)}, ssrc ${String(conn.audioSSRC ?? "?")}`,
-            values: [1, 2, high, 1, 2, high],
+            title: `mic test ${stamp()}, connection ${String(conn.mediaEngineConnectionId)}, ssrc ${String(conn.audioSSRC ?? "?")}, mic set to ${micPercent()}%`,
+            values: [1, 2, 4, 1, 2, 4, 1, 2, 4],
             set: v => rawInput(v),
             restore: () => {
                 rawInput(null);
@@ -359,9 +384,11 @@ async function runTest(kind: "boost" | "mic") {
         const samples = await measure(conn, plan, lines);
         plan.restore();
         lines.push(`  samples ${samples.length}`);
-        const r = summarize(samples, plan.values, lines);
-        const sorted = [...new Set(plan.values)].sort((a, b) => a - b);
-        finish(verdict(kind, r, sorted[sorted.length - 1], sorted[1], sorted[0]));
+        if (plan.failed) {
+            finish(`couldn't change the volume: ${plan.failed.slice(0, 60)}`);
+            return;
+        }
+        finish(verdict(kind, summarize(samples, plan.values, lines), plan.values));
     } catch (e) {
         caught(`${kind} test`, e);
         try {
@@ -377,7 +404,7 @@ export function startVolumeTest(kind: "boost" | "mic") {
         return;
     }
     log.running = kind;
-    showToast(kind === "boost" ? "testing for 10s, someone has to talk" : "testing for 10s, keep talking");
+    showToast(kind === "boost" ? "testing for 15s, someone has to talk" : "testing for 15s, keep talking");
     runTest(kind).catch(safe("volume test", (e: any) => {
         log.running = null;
         caught("volume test", e);

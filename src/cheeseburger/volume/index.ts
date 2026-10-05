@@ -121,8 +121,8 @@ function patchConnection(conn: any) {
         if (typeof userId !== "string" || typeof volume !== "number" || !Number.isFinite(volume)) return orig.apply(this, args);
         const ctx = connContext(this);
         const boost = getBoost(userId, ctx);
-        const out = boost && Number.isFinite(boost) && boost > DISCORD_MAX ? boost : volume;
-        note(`${ctx} ${short(userId)} ${short(volume)}${out !== volume ? ` -> ${out}` : ""}`);
+        const out = boost && Number.isFinite(boost) && boost > DISCORD_MAX ? toAmplitude(boost) : volume;
+        note(`${ctx} ${short(userId)} ${short(volume)}${out !== volume ? ` -> ${boost}% (${short(out)})` : ""}`);
         const next = [...args];
         next[1] = out;
         return traceLocalVolume(this, userId, out, ctx, () => orig.apply(this, next));
@@ -283,6 +283,12 @@ function toPerceptual(amplitude: number, base = 100) {
     if (amplitude <= 0) return 0;
     const db = 20 * Math.log10(amplitude / base);
     return base * (db > 0 ? db / 6 + 1 : (50 + db) / 50);
+}
+
+function toAmplitude(perceptual: number, base = 100) {
+    if (perceptual <= 0) return 0;
+    const db = perceptual > base ? (perceptual / base - 1) * 6 : (perceptual / base) * 50 - 50;
+    return base * Math.pow(10, db / 20);
 }
 const near = (a: number, b: number) => Math.abs(a - b) <= 1;
 
