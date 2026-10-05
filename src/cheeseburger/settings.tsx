@@ -151,6 +151,7 @@ export default function Settings() {
                                 onPress={() => showSheet("CheeseburgerArrange", ArrangeSheet)}
                             />
                             <TableSwitchRow label="Smart PiP" subLabel="never shows you, sticks to streams" value={split.smartPip !== false} onValueChange={(v: boolean) => split.updateSettings({ smartPip: v })} />
+                            <TableRow label="PiP size" subLabel="in-app pip, % of screen width, 0 = discord's" trailing={<NumberField value={split.pipWidth ?? 60} onCommit={n => split.updateSettings({ pipWidth: n })} />} />
                         </>
                     )}
                     <TableSwitchRow

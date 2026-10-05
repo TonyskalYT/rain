@@ -3,7 +3,7 @@ import { jsxRuntime } from "@api/react/jsx";
 import { findByStoreName } from "@metro";
 import { FluxDispatcher, React } from "@metro/common";
 import { SelectedChannelStore, UserStore } from "@metro/common/stores";
-import { NativeModules } from "react-native";
+import { Dimensions, NativeModules } from "react-native";
 
 import { caught, safe, safeInstead } from "../crash";
 import { hasPipStreamId, isParticipant, isStreamParticipant, pipValueLike, replacePipSource, sameId } from "./pipSource";
@@ -363,6 +363,21 @@ function floatingPipAllowed(state = renderFrame ? renderFrame.binding.controller
         && sameId(state.channelId, SelectedChannelStore?.getVoiceChannelId?.());
 }
 
+function bigger(ret: any, next: any): any {
+    const w = next.width;
+    const h = next.height;
+    const pct = Number(splitViewSettings.pipWidth);
+    if (typeof w !== "number" || typeof h !== "number" || !(w > 0) || !(h > 0) || !Number.isFinite(pct) || pct <= 0) return next;
+    const screen = Dimensions.get("window");
+    let scale = (screen.width * Math.min(95, Math.max(20, pct)) / 100) / w;
+    if (h * scale > screen.height * 0.45) scale = screen.height * 0.45 / h;
+    if (Math.abs(w * scale - w) < 0.5) return next;
+    const out = next === ret ? { ...ret } : next;
+    out.width = w * scale;
+    out.height = h * scale;
+    return out;
+}
+
 function observeController(args: any, ret: any) {
     if (!ret || typeof ret !== "object") return;
     const channelId = args?.channelId ?? SelectedChannelStore?.getVoiceChannelId?.();
@@ -409,13 +424,14 @@ function observeController(args: any, ret: any) {
             renderParticipant = want;
         }
     }
+    if (running && ret.mode === "IN_APP" && ret.showSecondaryPIP !== true) next = bigger(ret, next);
     if (next !== ret) {
         const cached = controllerSwapped.get(ret);
         if (cached && Object.keys(cached).length === Object.keys(next).length && Object.keys(next).every(key => cached[key] === next[key])) next = cached;
         else controllerSwapped.set(ret, next);
     }
     const focused = args?.focusedId != null || args?.focusedParticipantId != null;
-    const line = `controller mode=${String(ret.mode ?? "unknown")} panel=${String(args?.mode ?? "unknown")} secondary=${String(ret.showSecondaryPIP)} focused=${focused} drawer=${String(drawerState())} size=${ret.width ?? "?"}x${ret.height ?? "?"}${next.height !== ret.height ? `->${next.width}x${next.height}` : ""} id=${String(ret.id ?? "unknown")}${next.id !== ret.id ? `->${String(next.id)}` : ""} keys=${Object.keys(ret).slice(0, 12).join(",")}`;
+    const line = `controller mode=${String(ret.mode ?? "unknown")} panel=${String(args?.mode ?? "unknown")} secondary=${String(ret.showSecondaryPIP)} focused=${focused} drawer=${String(drawerState())} size=${ret.width ?? "?"}x${ret.height ?? "?"}${next.height !== ret.height || next.width !== ret.width ? `->${Math.round(next.width)}x${Math.round(next.height)}` : ""} box=${String(ret.containerHeight)} id=${String(ret.id ?? "unknown")}${next.id !== ret.id ? `->${String(next.id)}` : ""} keys=${Object.keys(ret).slice(0, 12).join(",")}`;
     if (!controllerShapes.includes(line)) {
         controllerShapes.push(line);
         if (controllerShapes.length > 6) controllerShapes.shift();

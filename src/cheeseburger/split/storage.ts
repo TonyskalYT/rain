@@ -11,6 +11,7 @@ interface SplitViewSettings {
     labOn: boolean;
     focusWhenShown: boolean | null;
     uiKeeper: string | null;
+    pipWidth: number;
 }
 
 export const {
@@ -27,4 +28,5 @@ export const {
     labOn: false,
     focusWhenShown: null,
     uiKeeper: null,
+    pipWidth: 60,
 });

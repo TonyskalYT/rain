@@ -141,6 +141,7 @@ Unexpected closes are logged with what Sentry said about the last run, the JS he
 
 ## Open items
 
+- In-app floating PiP size: `useControllerPIPState` (`voice_panel/native/pip/`) returns `{id, mode, width, height, containerHeight, showSecondaryPIP}`; Discord's IN_APP sizes are 120x120 for a camera (Smart PiP reshapes it to 16:9) and 200x112.5 for a screen. Charles found it too small (Oct 5), so `bigger()` in `split/pip.ts` scales width and height to `splitViewSettings.pipWidth`% of the window width (default 60, 20 to 95, 0 = Discord's size; height capped at 45% of the window). `containerHeight` is left alone; the debug's controller line now shows it as `box=`.
 - The in-app floating PiP (not Android PiP) may ignore pins. Its source isn't identified yet; the debug report logs the PiP components' inputs.
 - The Messages button in the guild rail is scoped for a bevel through its "Messages" label. It's unconfirmed on the phone.
 - Charles's goal (Oct 5): louder voices of other people (`default` context) and a louder mic. Stream audio isn't a goal.
