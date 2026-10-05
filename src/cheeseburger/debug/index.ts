@@ -303,6 +303,19 @@ export function disconnectDebug() {
 const two = (n: number) => String(n).padStart(2, "0");
 let sending: Promise<string> | null = null;
 
+function within<T>(p: Promise<T>, ms: number): Promise<T> {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(safe("debug timeout", () => reject(new Error("github didn't answer"))), ms);
+        p.then(v => {
+            clearTimeout(timer);
+            resolve(v);
+        }, e => {
+            clearTimeout(timer);
+            reject(e);
+        });
+    });
+}
+
 export function sendDebug(reason = "sent"): Promise<string> {
     if (sending) return sending;
     sending = (async () => {
@@ -315,8 +328,8 @@ export function sendDebug(reason = "sent"): Promise<string> {
         let status: string;
         try {
             const text = debugReport();
-            await put(repo, token, `debug/${name}-${reason}.txt`, text, `${reason} ${name}`);
-            await put(repo, token, "latest.txt", text, `latest ${name}`);
+            await within(put(repo, token, `debug/${name}-${reason}.txt`, text, `${reason} ${name}`), 25000);
+            await within(put(repo, token, "latest.txt", text, `latest ${name}`), 25000);
             debugSettings.lastSent = Date.now();
             status = `${reason} ${d.getHours() % 12 || 12}:${two(d.getMinutes())} ${d.getHours() < 12 ? "AM" : "PM"}`;
         } catch (e) {
