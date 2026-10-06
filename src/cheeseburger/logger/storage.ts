@@ -16,6 +16,8 @@ export interface LoggerSettings {
     saveServers: boolean;
     restore: boolean;
     maxSaved: number;
+    red: boolean;
+    markText: boolean;
 }
 
 export const {
@@ -37,4 +39,6 @@ export const {
     saveServers: false,
     restore: true,
     maxSaved: 3000,
+    red: true,
+    markText: true,
 });

@@ -84,6 +84,8 @@ export function LoggerPage() {
         <ScrollView contentContainerStyle={{ paddingVertical: 16, paddingHorizontal: 12, gap: 20 }}>
             <TableRowGroup title="In chat">
                 {switchRow("Keep deleted messages", "keepDeleted", s.keepDeleted !== false)}
+                {switchRow("Red highlight on deleted", "red", s.red !== false)}
+                {switchRow("Say deleted in the text too", "markText", s.markText !== false, "when discord won't show the note, like edited ones")}
                 {switchRow("Show edit history", "showEdits", s.showEdits !== false)}
                 <TableRow label="Old versions shown" subLabel="per message, 1 to 10" trailing={<Num value={s.depth} onCommit={n => set({ depth: n })} />} />
                 {switchRow("Servers too", "servers", s.servers !== false, "off = only dms and messages that mention you")}

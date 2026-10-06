@@ -13,6 +13,7 @@ import { DebugUploadSheet, SHEET } from "./debug/Sheet";
 import { useDebugSettings } from "./debug/storage";
 import { setFeature } from "./features";
 import { LoggerPage, openPage } from "./logger/Page";
+import { openAdvanced } from "./search/Advanced";
 import { SearchPage } from "./search/Page";
 import { ArrangeSheet, LABELS } from "./split/Arrange";
 import { useSplitViewSettings } from "./split/storage";
@@ -187,6 +188,12 @@ export default function Settings() {
                                 <TableSwitch value={s.logger !== false} onValueChange={(v: boolean) => setFeature("logger", v)} />
                             </View>
                         }
+                    />
+                    <TableRow
+                        label="Advanced search"
+                        subLabel="search with way more filters, or type /search in a chat"
+                        arrow
+                        onPress={() => openAdvanced(navigation)}
                     />
                     <TableRow
                         label="Smarter search"

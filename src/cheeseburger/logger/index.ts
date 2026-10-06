@@ -1,12 +1,12 @@
-import { before } from "@api/patcher";
+import { after, before } from "@api/patcher";
 import { waitForHydration } from "@api/storage";
-import { findByName, findByProps } from "@metro";
+import { findByName, findByProps, findByStoreName } from "@metro";
 import { FluxDispatcher } from "@metro/common";
 import { ChannelStore, GuildStore, MessageStore, UserStore } from "@metro/common/stores";
 import { isPluginEnabled, pluginInstances, startPlugin, stopPlugin } from "@plugins";
 
 import { caught, safe } from "../crash";
-import { flushSaved, getSaved, loadSaved, putSaved, Saved, savedIn, savedInfo, setSavedLimit } from "./saved";
+import { flushSaved, getSaved, loadSaved, putSaved, savedIn, savedInfo, setSavedLimit } from "./saved";
 import { loggerSettings, useLoggerSettings } from "./storage";
 
 interface Edit { old: string[]; current: string; }
@@ -15,21 +15,83 @@ const CORE = "messagelogger";
 const SKIP = "CHEESEBURGER_LOGGER_SKIP";
 const REPEAT_MS = 15_000;
 const HISTORY = /^-# (?:~~.*~~|\u200b.*)$/;
-const TYPES = new Set(["MESSAGE_DELETE", "MESSAGE_DELETE_BULK", "MESSAGE_UPDATE", "MESSAGE_START_EDIT", "LOAD_MESSAGES_SUCCESS", "LOAD_MESSAGES_AROUND_SUCCESS", "LOAD_MESSAGES_SUCCESS_CACHED", "LOCAL_MESSAGES_LOADED"]);
+const MARK = "\u2063";
+const MARKED = /^-# \u2063.*$/;
+const RED_BG = 0x26F04747 | 0;
+const RED_GUTTER = 0xFFF04747 | 0;
+const TYPES = new Set(["MESSAGE_DELETE", "MESSAGE_DELETE_BULK", "MESSAGE_UPDATE", "MESSAGE_START_EDIT", "MESSAGE_END_EDIT", "CONNECTION_OPEN", "LOAD_MESSAGES_SUCCESS", "LOAD_MESSAGES_AROUND_SUCCESS", "LOAD_MESSAGES_SUCCESS_CACHED", "LOCAL_MESSAGES_LOADED"]);
 const loads = new Map<string, string>();
 const G = globalThis as any;
 const ghosts: Map<string, number> = G.__cheeseburgerGhosts ??= new Map();
+const ghostInfo: Map<string, { channelId: string; at: number; }> = G.__cheeseburgerGhostInfo ??= new Map();
+const deletedRaw: Map<string, { channelId: string; at: number; raw: any; }> = G.__cheeseburgerDeletedRaw ??= new Map();
 const edits: Map<string, Edit> = G.__cheeseburgerEdits ??= new Map();
+const trail: string[] = G.__cheeseburgerLoggerTrail ??= [];
 const stats = { deletes: 0, repeats: 0, bulk: 0, edits: 0, editBox: 0, saved: 0, restored: 0 };
+const probe = { rows: 0, noteInRow: 0, noteInStore: 0, noteMissing: 0, red: 0, renotes: 0, marks: 0, opens: 0, hlCalls: 0, hlMsg: 0, hlNum: false, hlGhost: 0, hl: "not tried", hlShape: "", rowShape: "", notePath: "", rowTypes: new Set<string>() };
+const tags = new Map<string, number>();
+const lastTry = new Map<string, number>();
+const renoted = new Map<string, number>();
+const noteSeen = new Map<string, number>();
+const drawn = new Map<string, number>();
+let automod: any;
+let highlightOn = false;
 
 const unpatches: (() => unknown)[] = [];
 const timers: ReturnType<typeof setTimeout>[] = [];
 let running = false;
 let editBoxFixed = false;
-let note = "off";
+let status = "off";
 
 function cap(m: Map<string, unknown>, n: number) {
     while (m.size > n) m.delete(m.keys().next().value!);
+}
+
+function tag(id: string) {
+    if (!tags.has(id)) tags.set(id, tags.size + 1);
+    return `#${tags.get(id)}`;
+}
+
+function note(line: string) {
+    trail.push(`${clock(Date.now())} ${line}`);
+    if (trail.length > 30) trail.shift();
+}
+
+function automodStore(): any {
+    if (automod === undefined) {
+        try {
+            automod = findByStoreName("GuildAutomodMessageStore") ?? null;
+        } catch {
+            automod = null;
+        }
+    }
+    return automod;
+}
+
+function noteKept(id: string): boolean | null {
+    try {
+        const store = automodStore();
+        if (typeof store?.getMessage !== "function") return null;
+        return store.getMessage(id) != null;
+    } catch {
+        return null;
+    }
+}
+
+function shape(v: any): string {
+    if (!v || typeof v !== "object") return typeof v;
+    return Object.keys(v).slice(0, 24).map(k => `${k}:${Array.isArray(v[k]) ? "array" : typeof v[k]}`).join(",");
+}
+
+function pathOf(v: any, text: string, path = "", depth = 0): string | null {
+    if (depth > 6 || v == null) return null;
+    if (typeof v === "string") return v.split(`${MARK}${text}`).join("").includes(text) ? path || "." : null;
+    if (typeof v !== "object") return null;
+    for (const k of Object.keys(v)) {
+        const hit = pathOf(v[k], text, path ? `${path}.${k}` : k, depth + 1);
+        if (hit) return hit.replace(/\.\d+(?=\.|$)/g, "[]");
+    }
+    return null;
 }
 
 function coreOn(): boolean {
@@ -80,7 +142,7 @@ function split(content: string): Edit {
     const lines = content.split("\n");
     let i = 0;
     while (i < lines.length && HISTORY.test(lines[i])) i++;
-    return { old: lines.slice(0, i).map(l => (l.startsWith("-# ~~") ? l.slice(5, -2) : l.slice(4))), current: lines.slice(i).join("\n") };
+    return { old: lines.slice(0, i).map(l => (l.startsWith("-# ~~") ? l.slice(5, -2) : l.slice(4))), current: lines.slice(i).filter(l => !MARKED.test(l)).join("\n") };
 }
 
 function channelOf(id: string): any {
@@ -233,9 +295,16 @@ function saveEdited(m: any, prev: any, rec: Edit, channelId: string, ch: any) {
     stats.saved++;
 }
 
-function ghostEvent(channelId: string, id: string, at: number, fresh: boolean) {
-    ghosts.set(id, fresh ? Date.now() : 0);
-    cap(ghosts, 2000);
+function remember(id: string, channelId: string, at: number, raw?: any) {
+    ghostInfo.set(id, { channelId, at });
+    cap(ghostInfo, 2000);
+    if (raw) {
+        deletedRaw.set(id, { channelId, at, raw });
+        cap(deletedRaw, 500);
+    }
+}
+
+function noteEvent(channelId: string, id: string, at: number) {
     return {
         type: "MESSAGE_EDIT_FAILED_AUTOMOD",
         cheeseburgerLogger: true,
@@ -244,10 +313,102 @@ function ghostEvent(channelId: string, id: string, at: number, fresh: boolean) {
     };
 }
 
-function redraw(message: any) {
+function ghostEvent(channelId: string, id: string, at: number, fresh: boolean) {
+    if (fresh || !ghosts.has(id)) ghosts.set(id, fresh ? Date.now() : 0);
+    cap(ghosts, 2000);
+    remember(id, channelId, at);
+    return noteEvent(channelId, id, at);
+}
+
+function redraw(id: string, channelId: string) {
     timers.push(setTimeout(safe("logger redraw", () => {
-        FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", otherPluginBypass: true, cheeseburgerLogger: true, message: { ...message } });
+        const cur = MessageStore.getMessage?.(channelId, id);
+        if (!cur) return;
+        FluxDispatcher.dispatch({
+            type: "MESSAGE_UPDATE",
+            otherPluginBypass: true,
+            cheeseburgerLogger: true,
+            message: { id, channel_id: channelId, attachments: Array.isArray(cur.attachments) ? [...cur.attachments] : [], pinned: cur.pinned, flags: cur.flags },
+        });
     }), 0));
+}
+
+function checkNote(id: string) {
+    timers.push(setTimeout(safe("logger note check", () => {
+        const kept = noteKept(id);
+        note(`note for ${tag(id)} ${kept === null ? "unknown" : kept ? "set" : "missing"}`);
+    }), 50));
+}
+
+const throttled = (key: string, ms: number) => {
+    const now = Date.now();
+    if (now - (lastTry.get(key) ?? 0) < ms) return true;
+    lastTry.set(key, now);
+    cap(lastTry, 500);
+    return false;
+};
+
+function renote(id: string, why: string) {
+    const info = ghostInfo.get(id);
+    if (!info || !ghosts.has(id) || (renoted.get(id) ?? 0) >= 3 || throttled(`n${id}`, 3000)) return;
+    timers.push(setTimeout(safe("logger renote", () => {
+        if (!running || coreOn() || noteKept(id) === true) return;
+        if (!MessageStore.getMessage?.(info.channelId, id)) return;
+        renoted.set(id, (renoted.get(id) ?? 0) + 1);
+        cap(renoted, 500);
+        FluxDispatcher.dispatch(noteEvent(info.channelId, id, info.at));
+        probe.renotes++;
+        note(`note put back on ${tag(id)} (${why})`);
+    }), 0));
+}
+
+function renoteAll(why: string) {
+    timers.push(setTimeout(safe("logger renote all", () => {
+        if (!running || coreOn()) return;
+        let n = 0;
+        for (const [id, info] of ghostInfo) {
+            if (!ghosts.has(id) || noteKept(id) === true || !MessageStore.getMessage?.(info.channelId, id)) continue;
+            FluxDispatcher.dispatch(noteEvent(info.channelId, id, info.at));
+            if (++n >= 300) break;
+        }
+        probe.renotes += n;
+        note(`${why}: put back ${n} notes`);
+    }), 1500));
+}
+
+function nudge(id: string, channelId: string, at: number) {
+    timers.push(setTimeout(safe("logger nudge", () => {
+        if (!running || coreOn() || !ghosts.has(id)) return;
+        if ((drawn.get(id) ?? 0) >= at) {
+            note(`${tag(id)} drawn ${(noteSeen.get(id) ?? 0) >= at ? "with" : "without"} its note`);
+            return;
+        }
+        note(`${tag(id)} not redrawn yet, nudging`);
+        redraw(id, channelId);
+    }), 1500));
+}
+
+function isEdited(m: any): boolean {
+    return m?.editedTimestamp != null || m?.edited_timestamp != null || !!edits.get(m?.id)?.old.length || typeof m?.content === "string" && split(m.content).old.length > 0;
+}
+
+function mark(id: string) {
+    const info = ghostInfo.get(id);
+    if (!info || throttled(`m${id}`, 2000)) return;
+    timers.push(setTimeout(safe("logger mark", () => {
+        if (!running || coreOn() || !ghosts.has(id) || Date.now() - (noteSeen.get(id) ?? 0) < 1500) return;
+        const cur = MessageStore.getMessage?.(info.channelId, id);
+        if (!cur || typeof cur.content !== "string" || cur.content.includes(MARK)) return;
+        const line = `-# ${MARK}deleted at ${when(info.at)}`;
+        FluxDispatcher.dispatch({
+            type: "MESSAGE_UPDATE",
+            otherPluginBypass: true,
+            cheeseburgerLogger: true,
+            message: { id, channel_id: info.channelId, content: cur.content ? `${cur.content}\n${line}` : line, pinned: cur.pinned },
+        });
+        probe.marks++;
+        note(`marked ${tag(id)} as deleted in its text`);
+    }), 400));
 }
 
 function onDelete(args: any[], e: any) {
@@ -269,8 +430,13 @@ function onDelete(args: any[], e: any) {
     if (saving(ch, message)) saveDeleted(message, channelId, ch);
     if (loggerSettings.keepDeleted === false || !shown(ch, message)) return;
     stats.deletes++;
-    args[0] = ghostEvent(channelId, id, Date.now(), true);
-    redraw(message);
+    const at = Date.now();
+    args[0] = ghostEvent(channelId, id, at, true);
+    remember(id, channelId, at, rawOf({ ...message, content: typeof message.content === "string" ? message.content.split("\n").filter((l: string) => !MARKED.test(l)).join("\n") : "" }, channelId));
+    note(`deleted ${tag(id)}${isEdited(message) ? " (edited)" : ""}${message.author?.id && message.author.id === myId() ? " (mine)" : ""}`);
+    redraw(id, channelId);
+    checkNote(id);
+    nudge(id, channelId, at);
     return args;
 }
 
@@ -301,12 +467,17 @@ function onBulk(args: any[], e: any) {
     }
     if (keep.length === ids.length) return;
     stats.bulk += later.length;
-    for (const [id] of later) ghosts.set(id, Date.now());
+    const at = Date.now();
+    for (const [id, message] of later) {
+        ghosts.set(id, at);
+        remember(id, channelId, at, rawOf(message, channelId));
+    }
+    note(`bulk deleted ${later.length}`);
     args[0] = keep.length ? { ...e, ids: keep } : { type: SKIP };
     timers.push(setTimeout(safe("logger bulk", () => {
-        for (const [id, message] of later) {
-            FluxDispatcher.dispatch(ghostEvent(channelId, id, Date.now(), true));
-            FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", otherPluginBypass: true, cheeseburgerLogger: true, message: { ...message } });
+        for (const [id] of later) {
+            FluxDispatcher.dispatch(ghostEvent(channelId, id, at, true));
+            redraw(id, channelId);
         }
     }), 0));
     return args;
@@ -369,21 +540,27 @@ function onLoad(args: any[], e: any) {
         changed = true;
         return { ...m, content: compose(rec.old, m.content) };
     });
-    const restored: Saved[] = [];
+    const restored: { id: string; at: number; raw: any; }[] = [];
     if (loggerSettings.restore !== false && loggerSettings.keepDeleted !== false) {
         const ids = list.map(m => m?.id).filter((x: any): x is string => typeof x === "string").sort(cmpId);
         const oldest = ids[0];
         const newest = ids[ids.length - 1];
         const present = new Set(ids);
-        for (const s of savedIn(channelId)) {
-            if (s.kind !== "deleted" || !s.raw || present.has(s.id)) continue;
+        const pool = new Map<string, { id: string; at: number; raw: any; }>();
+        for (const s of savedIn(channelId)) if (s.kind === "deleted" && s.raw) pool.set(s.id, { id: s.id, at: s.at, raw: s.raw });
+        for (const [id, d] of deletedRaw) if (d.channelId === channelId && !pool.has(id)) pool.set(id, { id, at: d.at, raw: d.raw });
+        for (const s of pool.values()) {
+            if (present.has(s.id)) continue;
             if (cmpId(s.id, oldest) < 0 && e.hasMoreBefore !== false) continue;
             if (cmpId(s.id, newest) > 0 && (e.isBefore || e.hasMoreAfter)) continue;
             restored.push(s);
         }
     }
     if (!changed && !restored.length) return;
-    for (const s of restored) ghosts.set(s.id, 0);
+    for (const s of restored) {
+        if (!ghosts.has(s.id)) ghosts.set(s.id, 0);
+        remember(s.id, channelId, s.at);
+    }
     const merged = restored.length ? [...out, ...restored.map(s => ({ ...s.raw }))].sort((a, b) => cmpId(String(b?.id ?? ""), String(a?.id ?? ""))) : out;
     args[0] = { ...e, messages: merged };
     if (restored.length) {
@@ -411,6 +588,16 @@ const onDispatch = safe("logger", (args: any[]) => {
         case "MESSAGE_DELETE": return onDelete(args, e);
         case "MESSAGE_DELETE_BULK": return onBulk(args, e);
         case "MESSAGE_START_EDIT": break;
+        case "MESSAGE_END_EDIT": {
+            const id = e.response?.body?.id;
+            if (typeof id === "string" && ghosts.has(id)) renote(id, "edit ended");
+            return;
+        }
+        case "CONNECTION_OPEN":
+            probe.opens++;
+            renoted.clear();
+            if (ghosts.size) renoteAll("reconnected");
+            return;
         default: return onLoad(args, e);
     }
     const clean = cleanContent(e.messageId, e.content);
@@ -447,20 +634,81 @@ function paintGhosts() {
     const RowManager = findByName("RowManager");
     if (typeof RowManager?.prototype?.generate !== "function") return;
     unpatches.push(before("generate", RowManager.prototype, safe("logger row", (args: any[]) => {
-        const msg = args[0]?.message;
-        if (!msg || !ghosts.has(msg.id) || msg.style || coreOn()) return;
-        msg.style = { backgroundColor: "rgba(240, 71, 71, 0.1)", borderLeftWidth: 4, borderLeftColor: "#F04747" };
+        const data = args[0];
+        const msg = data?.message;
+        if (!msg || !ghosts.has(msg.id) || coreOn()) return;
+        if (loggerSettings.red === false) return;
+        if (!msg.style) msg.style = { backgroundColor: "rgba(240, 71, 71, 0.1)", borderLeftWidth: 4, borderLeftColor: "#F04747" };
+        if (highlightOn && probe.hlMsg > 0 && !msg.mentioned && typeof msg.set === "function") {
+            const copy = msg.set("mentioned", true);
+            if (copy && copy !== msg) data.message = copy;
+        }
     })));
+    unpatches.push(after("generate", RowManager.prototype, safe("logger row after", (args: any[], row: any) => {
+        const data = args[0];
+        const msg = data?.message;
+        if (!msg || !row || typeof row !== "object" || coreOn()) return;
+        const isRow = data?.rowType == null || data.rowType === 1;
+        if (!probe.rowShape && isRow) probe.rowShape = `row {${shape(row)}} message {${shape(row.message)}}`;
+        if (!ghosts.has(msg.id)) return;
+        drawn.set(msg.id, Date.now());
+        cap(drawn, 500);
+        if (probe.rowTypes.size < 6) probe.rowTypes.add(String(data?.rowType));
+        let json = "";
+        try {
+            json = JSON.stringify(row);
+        } catch { }
+        const shown = json.split(`${MARK}deleted at`).join("").includes("deleted at");
+        if (shown) {
+            noteSeen.set(msg.id, Date.now());
+            cap(noteSeen, 500);
+            if (!probe.notePath) probe.notePath = `${isRow ? "" : `row type ${String(data?.rowType)} `}${pathOf(row, "deleted at") ?? "?"}`;
+        }
+        if (!isRow) return;
+        probe.rows++;
+        if (shown) probe.noteInRow++;
+        const kept = noteKept(msg.id);
+        if (kept === true) probe.noteInStore++;
+        if (kept === false) {
+            probe.noteMissing++;
+            renote(msg.id, "row without note");
+        }
+        if (!shown && loggerSettings.markText !== false && (probe.notePath || isEdited(msg)) && !(typeof msg.content === "string" && msg.content.includes(MARK))) mark(msg.id);
+    })));
+}
+
+function paintRed() {
+    const utils = findByProps("createBackgroundHighlight");
+    if (typeof utils?.createBackgroundHighlight !== "function") {
+        probe.hl = "not found";
+        return;
+    }
+    unpatches.push(after("createBackgroundHighlight", utils, safe("logger red", (args: any[], ret: any) => {
+        probe.hlCalls++;
+        if (ret && typeof ret === "object" && !probe.hlShape) probe.hlShape = shape(ret);
+        const id = args[0]?.message?.id;
+        if (typeof id === "string") probe.hlMsg++;
+        if (typeof ret?.backgroundColor === "number") probe.hlNum = true;
+        if (typeof id !== "string" || !ghosts.has(id) || coreOn() || loggerSettings.red === false || !ret || typeof ret !== "object") return;
+        probe.hlGhost++;
+        const next = { ...ret };
+        if (typeof ret.backgroundColor === "number") next.backgroundColor = RED_BG;
+        if (typeof ret.gutterColor === "number") next.gutterColor = RED_GUTTER;
+        probe.red++;
+        return next;
+    })));
+    highlightOn = true;
+    probe.hl = "on";
 }
 
 const takeOver = safe("logger takeover", () => {
     if (!running || !pluginInstances.has(CORE) || !isPluginEnabled(CORE)) return;
     stopPlugin(CORE).then(safe("logger took over", () => {
         loggerSettings.tookOver = true;
-        note = "took over from the old MessageLogger plugin";
+        status = "took over from the old MessageLogger plugin";
     }), (e: any) => {
         caught("logger takeover", e);
-        note = "couldn't turn off the old MessageLogger plugin";
+        status = "couldn't turn off the old MessageLogger plugin";
     });
 });
 
@@ -468,7 +716,7 @@ export default {
     async start() {
         await waitForHydration(useLoggerSettings);
         running = true;
-        note = "on";
+        status = "on";
         setSavedLimit(Number(loggerSettings.maxSaved) || 3000);
         loadSaved().catch((e: any) => caught("logger load", e));
         unpatches.push(before("dispatch", FluxDispatcher, onDispatch));
@@ -476,6 +724,12 @@ export default {
             fixEditBox();
         } catch (e) {
             caught("logger edit box", e);
+        }
+        try {
+            paintRed();
+        } catch (e) {
+            probe.hl = "failed";
+            caught("logger red", e);
         }
         try {
             paintGhosts();
@@ -494,7 +748,8 @@ export default {
             } catch { }
         }
         editBoxFixed = false;
-        note = "off";
+        highlightOn = false;
+        status = "off";
         void flushSaved();
         if (!G.__cheeseburgerSwapping && loggerSettings.tookOver && pluginInstances.has(CORE)) {
             loggerSettings.tookOver = false;
@@ -506,10 +761,15 @@ export default {
 export function loggerDebug(): string[] {
     const info = savedInfo();
     return [
-        `logger: ${note}, old plugin ${coreOn() ? "on (cheeseburger steps aside)" : "off"}, edit box fix ${editBoxFixed ? "on" : "off (own edits not shown)"}`,
+        `logger: ${status}, old plugin ${coreOn() ? "on (cheeseburger steps aside)" : "off"}, edit box fix ${editBoxFixed ? "on" : "off (own edits not shown)"}`,
         `kept deleted ${stats.deletes}, repeat deletes swallowed ${stats.repeats}, bulk ${stats.bulk}, edits ${stats.edits}, edit box cleaned ${stats.editBox}, remembered ${ghosts.size} deleted / ${edits.size} edited`,
         `saved on phone: ${info.loaded ? `${info.count} messages, ${info.kb}kb` : "loading"}, saved this run ${stats.saved}, put back in chat ${stats.restored}`,
         `loads seen: ${[...loads].map(([t, v]) => `${t} ${v}`).join("; ") || "none yet"}`,
+        `deleted rows drawn ${probe.rows}: note in row ${probe.noteInRow}, note in store ${probe.noteInStore}, note missing ${probe.noteMissing}, red ${probe.red}, notes put back ${probe.renotes}, marked in text ${probe.marks}, reconnects ${probe.opens}`,
+        `automod note store ${automodStore() ? "found" : "not found"}, note found at ${probe.notePath || "?"}`,
+        `red highlight ${probe.hl}, calls ${probe.hlCalls} (with a message ${probe.hlMsg}), on deleted ${probe.hlGhost}, shape {${probe.hlShape || "?"}}, deleted row types ${[...probe.rowTypes].join(",") || "?"}`,
+        `row shape: ${probe.rowShape || "none yet"}`.slice(0, 600),
+        ...(trail.length ? ["trail:", ...trail.map(l => `  ${l}`)] : []),
         `settings: ${JSON.stringify(useLoggerSettings.getState())}`.slice(0, 500),
     ];
 }

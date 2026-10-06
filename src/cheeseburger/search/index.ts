@@ -1,6 +1,9 @@
+import { registerCommand } from "@api/commands";
+import { ApplicationCommandOptionType, RainApplicationCommand } from "@api/commands/types";
 import { waitForHydration } from "@api/storage";
 import { UserStore } from "@metro/common/stores";
 
+import { advancedStats, openAdvanced } from "./Advanced";
 import { rewriteSearch, rewriteTabs } from "./query";
 import { searchSettings, useSearchSettings } from "./storage";
 
@@ -10,6 +13,7 @@ const seen = { get: 0, tabs: 0, other: 0, last: "" };
 
 let active = false;
 let hook: { proto: any; open: Function; send: Function; myOpen: Function; mySend: Function; } | null = null;
+let unregister: (() => unknown) | null = null;
 let note = "off";
 
 function myId(): string | undefined {
@@ -84,14 +88,63 @@ function install(): string {
     return "rewriting discord searches";
 }
 
+const searchCommand = (): RainApplicationCommand => ({
+    name: "search",
+    displayName: "search",
+    description: "Advanced search with way more filters.",
+    displayDescription: "Advanced search with way more filters.",
+    applicationId: "-1",
+    inputType: 1,
+    type: 1,
+    shouldHide: () => false,
+    options: [
+        {
+            name: "for",
+            description: "Words to look for",
+            type: ApplicationCommandOptionType.STRING,
+            required: false,
+            displayName: "for",
+            displayDescription: "Words to look for",
+        },
+    ],
+    execute: (args, ctx) => {
+        const words = args?.find?.((a: any) => a.name === "for")?.value;
+        const channelId = ctx?.channel?.id;
+        setTimeout(() => {
+            try {
+                openAdvanced(null, channelId, typeof words === "string" && words.trim() ? words.trim() : undefined);
+            } catch { }
+        }, 50);
+    },
+});
+
+function searchFiles(): string[] {
+    const out: string[] = [];
+    const mods: any = G.modules ?? {};
+    for (const id of Object.keys(mods)) {
+        const p = mods[id]?.__filePath;
+        if (typeof p !== "string" || !/search/i.test(p) || !/native|\.tsx$/.test(p) || /emoji|gif|sticker|soundboard|friend|member|discovery|directory|command|emoji/i.test(p)) continue;
+        out.push(`  ${p.replace(/^modules\//, "")}${mods[id].isInitialized ? "" : " (not loaded)"}`);
+        if (out.length >= 40) break;
+    }
+    return out.length ? ["discord search files:", ...out] : ["discord search files: none found"];
+}
+
 export default {
     async start() {
         await waitForHydration(useSearchSettings);
         active = true;
         if (!hook) note = install();
+        try {
+            unregister ??= registerCommand(searchCommand());
+        } catch { }
     },
     stop() {
         active = false;
+        try {
+            unregister?.();
+        } catch { }
+        unregister = null;
         if (hook) {
             try {
                 if (hook.proto.open === hook.myOpen) hook.proto.open = hook.open;
@@ -104,8 +157,11 @@ export default {
 };
 
 export function searchDebug(): string[] {
+    const a = advancedStats;
     return [
-        `search: ${note}, precise has ${searchSettings.preciseHas !== false ? "on" : "off"}, searches seen ${seen.tabs} tabs / ${seen.get} get / ${seen.other} other${seen.last ? ` (last other ${seen.last})` : ""}, rewrote ${log.length ? `${log.length} recently` : "none yet"}`,
+        `search: ${note}, precise has ${searchSettings.preciseHas !== false ? "on" : "off"}, /search ${unregister ? "on" : "off"}, searches seen ${seen.tabs} tabs / ${seen.get} get / ${seen.other} other${seen.last ? ` (last other ${seen.last})` : ""}, rewrote ${log.length ? `${log.length} recently` : "none yet"}`,
         ...log.map(l => `  ${l}`),
+        `advanced: opened ${a.opened} (${a.openVia || "never"}), searches ${a.searches}, errors ${a.errors}${a.lastError ? ` (last: ${a.lastError})` : ""}, last results ${a.lastResults || "none"}, jumps ${a.jumps}${a.jumpVia ? ` via ${a.jumpVia}` : ""}`,
+        ...searchFiles(),
     ];
 }
