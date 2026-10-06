@@ -72,6 +72,7 @@ export function hookSounds() {
     for (const [label, obj] of candidates()) {
         const list = methodNames(obj);
         if (!found.some(f => f.startsWith(`${label} `))) found.push(`${label} [${list.join(",").slice(0, 200)}]`);
+        if (!list.includes("prepare")) continue;
         for (const name of list) {
             if (hooks.some(h => h.obj === obj && h.name === name)) continue;
             const orig = obj[name];

@@ -167,6 +167,15 @@ export default function Settings() {
                     />
                 </TableRowGroup>
 
+                <TableRowGroup title="Chat">
+                    <TableSwitchRow
+                        label="Message logger"
+                        subLabel="keeps deleted messages, shows old versions of edits"
+                        value={s.logger !== false}
+                        onValueChange={(v: boolean) => setFeature("logger", v)}
+                    />
+                </TableRowGroup>
+
                 <TableRowGroup title="Style">
                     <TableSwitchRow
                         label="Beveled buttons"

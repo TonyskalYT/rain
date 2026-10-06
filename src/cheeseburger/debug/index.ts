@@ -9,6 +9,7 @@ import { AppState, Dimensions, PixelRatio, Platform, StatusBar } from "react-nat
 
 import { caught, crashDebug, lastCrashAt, safe } from "../crash";
 import { useDeafenButtonSettings } from "../deafen/storage";
+import { loggerDebug } from "../logger";
 import { lookDebug } from "../look";
 import { rotateDebug } from "../rotate";
 import { shareDebug } from "../share";
@@ -210,6 +211,7 @@ export function debugReport(): string {
         ["volume", volumeDebug],
         ["voice", voiceDebug],
         ["rotate", rotateDebug],
+        ["logger", loggerDebug],
     ];
     const out = [`cheeseburger debug ${stamp(Date.now())}`];
     for (const [name, fn] of sections) out.push("", `== ${name}`, ...attempt(name, fn));

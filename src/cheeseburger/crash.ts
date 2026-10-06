@@ -8,7 +8,7 @@ import { AppState } from "react-native";
 import { voiceSettings } from "./voice/storage";
 import { volumeBoostSettings } from "./volume/storage";
 
-type Kind = "crash" | "error" | "caught" | "closed";
+type Kind = "crash" | "error" | "caught" | "closed" | "gone";
 
 interface Entry { at: number; kind: Kind; what: string; stack?: string; n?: number; }
 interface Session { started: number; beat: number; state: string; call?: boolean; rev: string; ended?: string; heap?: number; peak?: number; gains?: string; }
@@ -74,7 +74,7 @@ function notify() {
 
 function trim() {
     saved.log.sort((a, b) => a.at - b.at);
-    for (const kind of ["error", "caught", "closed", "crash"] as Kind[]) {
+    for (const kind of ["gone", "error", "caught", "closed", "crash"] as Kind[]) {
         while (saved.log.length > MAX) {
             const i = saved.log.findIndex(e => e.kind === kind);
             if (i === -1) break;
@@ -274,6 +274,8 @@ async function restore(checked: boolean) {
         if (prev.state === "active" || prev.call || android) {
             const where = prev.state === "active" ? "open" : prev.call ? "in a call in the background" : "in the background";
             add("closed", `closed while ${where}, no error caught (${context(prev, android)})`, undefined, prev.beat);
+        } else if (typeof prev.beat === "number") {
+            add("gone", `gone while in the background, reopened ${Math.max(0, Math.round((Date.now() - prev.beat) / 60000))}m later (${context(prev, android)})`, undefined, prev.beat);
         }
     }
     ready = true;
