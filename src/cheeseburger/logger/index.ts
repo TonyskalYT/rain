@@ -14,8 +14,9 @@ interface Edit { old: string[]; current: string; }
 const CORE = "messagelogger";
 const SKIP = "CHEESEBURGER_LOGGER_SKIP";
 const REPEAT_MS = 15_000;
-const HISTORY = /^-# ~~.*~~$/;
-const TYPES = new Set(["MESSAGE_DELETE", "MESSAGE_DELETE_BULK", "MESSAGE_UPDATE", "MESSAGE_START_EDIT", "LOAD_MESSAGES_SUCCESS"]);
+const HISTORY = /^-# (?:~~.*~~|\u200b.*)$/;
+const TYPES = new Set(["MESSAGE_DELETE", "MESSAGE_DELETE_BULK", "MESSAGE_UPDATE", "MESSAGE_START_EDIT", "LOAD_MESSAGES_SUCCESS", "LOAD_MESSAGES_AROUND_SUCCESS", "LOAD_MESSAGES_SUCCESS_CACHED", "LOCAL_MESSAGES_LOADED"]);
+const loads = new Map<string, string>();
 const G = globalThis as any;
 const ghosts: Map<string, number> = G.__cheeseburgerGhosts ??= new Map();
 const edits: Map<string, Edit> = G.__cheeseburgerEdits ??= new Map();
@@ -67,7 +68,7 @@ function subtext(text: string): string[] {
     return text.split("\n")
         .map(l => l.replace(/```\w*/g, "").replace(/~~/g, "").replace(/^\s*(?:>>>|>|-#|#{1,3}(?=\s)|[*-](?=\s))\s*/, "").trim())
         .filter(Boolean)
-        .map(l => `-# ~~${l}~~`);
+        .map(l => `-# \u200b${l}`);
 }
 
 function compose(old: string[], current: string): string {
@@ -79,7 +80,7 @@ function split(content: string): Edit {
     const lines = content.split("\n");
     let i = 0;
     while (i < lines.length && HISTORY.test(lines[i])) i++;
-    return { old: lines.slice(0, i).map(l => l.slice(5, -2)), current: lines.slice(i).join("\n") };
+    return { old: lines.slice(0, i).map(l => (l.startsWith("-# ~~") ? l.slice(5, -2) : l.slice(4))), current: lines.slice(i).join("\n") };
 }
 
 function channelOf(id: string): any {
@@ -348,6 +349,8 @@ const cmpId = (a: string, b: string) => a.length - b.length || (a < b ? -1 : a >
 function onLoad(args: any[], e: any) {
     const channelId = e.channelId;
     const list: any[] | null = Array.isArray(e.messages) ? e.messages : null;
+    const flags = ["isBefore", "isAfter", "jump", "cached", "hasMoreBefore", "hasMoreAfter"].filter(k => e[k]).join(" ");
+    loads.set(e.type, `${list ? list.length : "no list"} msgs${flags ? ` (${flags})` : ""}`);
     if (!channelId || !list?.length) return;
     let changed = false;
     const out = list.map(m => {
@@ -373,7 +376,7 @@ function onLoad(args: any[], e: any) {
         const newest = ids[ids.length - 1];
         const present = new Set(ids);
         for (const s of savedIn(channelId)) {
-            if (s.kind !== "deleted" || !s.raw || present.has(s.id) || ghosts.has(s.id)) continue;
+            if (s.kind !== "deleted" || !s.raw || present.has(s.id)) continue;
             if (cmpId(s.id, oldest) < 0 && e.hasMoreBefore !== false) continue;
             if (cmpId(s.id, newest) > 0 && (e.isBefore || e.hasMoreAfter)) continue;
             restored.push(s);
@@ -407,7 +410,8 @@ const onDispatch = safe("logger", (args: any[]) => {
         case "MESSAGE_UPDATE": return onUpdate(args, e);
         case "MESSAGE_DELETE": return onDelete(args, e);
         case "MESSAGE_DELETE_BULK": return onBulk(args, e);
-        case "LOAD_MESSAGES_SUCCESS": return onLoad(args, e);
+        case "MESSAGE_START_EDIT": break;
+        default: return onLoad(args, e);
     }
     const clean = cleanContent(e.messageId, e.content);
     if (clean == null) return;
@@ -505,6 +509,7 @@ export function loggerDebug(): string[] {
         `logger: ${note}, old plugin ${coreOn() ? "on (cheeseburger steps aside)" : "off"}, edit box fix ${editBoxFixed ? "on" : "off (own edits not shown)"}`,
         `kept deleted ${stats.deletes}, repeat deletes swallowed ${stats.repeats}, bulk ${stats.bulk}, edits ${stats.edits}, edit box cleaned ${stats.editBox}, remembered ${ghosts.size} deleted / ${edits.size} edited`,
         `saved on phone: ${info.loaded ? `${info.count} messages, ${info.kb}kb` : "loading"}, saved this run ${stats.saved}, put back in chat ${stats.restored}`,
+        `loads seen: ${[...loads].map(([t, v]) => `${t} ${v}`).join("; ") || "none yet"}`,
         `settings: ${JSON.stringify(useLoggerSettings.getState())}`.slice(0, 500),
     ];
 }

@@ -12,6 +12,7 @@ import { useDeafenButtonSettings } from "../deafen/storage";
 import { loggerDebug } from "../logger";
 import { lookDebug } from "../look";
 import { rotateDebug } from "../rotate";
+import { searchDebug } from "../search";
 import { shareDebug } from "../share";
 import { useShareSettings } from "../share/storage";
 import { factoryDebug } from "../split";
@@ -214,6 +215,7 @@ export function debugReport(): string {
         ["rotate", rotateDebug],
         ["logger", loggerDebug],
         ["spotify", spotifyDebug],
+        ["search", searchDebug],
     ];
     const out = [`cheeseburger debug ${stamp(Date.now())}`];
     for (const [name, fn] of sections) out.push("", `== ${name}`, ...attempt(name, fn));

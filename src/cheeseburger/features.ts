@@ -4,6 +4,7 @@ import { caught } from "./crash";
 import deafen from "./deafen";
 import messageLogger from "./logger";
 import rotate from "./rotate";
+import search from "./search";
 import share from "./share";
 import split from "./split";
 import spotify from "./spotify";
@@ -18,7 +19,7 @@ interface Feature {
     stop(): unknown;
 }
 
-export const FEATURES: Record<FeatureId, Feature> = { volume, deafen, split, rotate, style, share, updates, voice, logger: messageLogger, spotify };
+export const FEATURES: Record<FeatureId, Feature> = { volume, deafen, split, rotate, style, share, updates, voice, logger: messageLogger, spotify, search };
 
 const running = new Set<FeatureId>();
 const chains = new Map<FeatureId, Promise<unknown>>();

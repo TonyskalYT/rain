@@ -147,7 +147,7 @@ function Entry({ e }: { e: Saved; }) {
             <Text variant="text-sm/semibold" color="text-default" style={text ? { color: text } : undefined}>{e.author}</Text>
             <Text variant="text-xs/medium" color="text-muted" style={muted ? { color: muted } : undefined}>{`${e.kind} ${when(e.at)} · ${e.where}`}</Text>
             {e.old.map((o, i) => (
-                <Text key={i} variant="text-sm/normal" color="text-muted" style={{ color: muted, textDecorationLine: "line-through" }}>{o}</Text>
+                <Text key={i} variant="text-sm/normal" color="text-muted" style={muted ? { color: muted } : undefined}>{o}</Text>
             ))}
             {!!e.content && <Text variant="text-md/normal" color="text-default" style={text ? { color: text } : undefined}>{e.content}</Text>}
             {e.files.map((f, i) => (
