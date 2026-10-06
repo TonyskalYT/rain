@@ -2,8 +2,8 @@ import { findAssetId } from "@api/assets";
 import { hotStatus } from "@api/hot/status";
 import { showSheet } from "@api/ui/sheets";
 import { showToast } from "@api/ui/toasts";
-import { clipboard, React } from "@metro/common";
-import { Button, Stack, TableRow, TableRowGroup, TableSwitchRow, Text, TextInput } from "@metro/common/components";
+import { clipboard, NavigationNative, React } from "@metro/common";
+import { Button, IconButton, Stack, TableRow, TableRowGroup, TableSwitch, TableSwitchRow, Text, TextInput } from "@metro/common/components";
 import { ScrollView, View } from "react-native";
 
 import { useCrashSummary } from "./crash";
@@ -12,6 +12,7 @@ import { debugReport, sendDebug } from "./debug";
 import { DebugUploadSheet, SHEET } from "./debug/Sheet";
 import { useDebugSettings } from "./debug/storage";
 import { setFeature } from "./features";
+import { LoggerPage, openPage } from "./logger/Page";
 import { ArrangeSheet, LABELS } from "./split/Arrange";
 import { useSplitViewSettings } from "./split/storage";
 import { currentOrder } from "./split/tiles";
@@ -72,6 +73,12 @@ export default function Settings() {
     const [sending, setSending] = React.useState(false);
     const boosted = Object.keys(volume.boosted ?? {}).length;
     const live = `${hotStatus.source}${hotStatus.revision ? ` ${hotStatus.revision.slice(0, 7)}` : ""}`;
+    let navigation: any = null;
+    try {
+        navigation = NavigationNative.useNavigation();
+    } catch { }
+    const gear = findAssetId("SettingsIcon");
+    const openLogger = () => openPage(navigation, "Message logger", LoggerPage);
 
     return (
         <ScrollView style={{ flex: 1 }}>
@@ -168,11 +175,16 @@ export default function Settings() {
                 </TableRowGroup>
 
                 <TableRowGroup title="Chat">
-                    <TableSwitchRow
+                    <TableRow
                         label="Message logger"
                         subLabel="keeps deleted messages, shows old versions of edits"
-                        value={s.logger !== false}
-                        onValueChange={(v: boolean) => setFeature("logger", v)}
+                        onPress={openLogger}
+                        trailing={
+                            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                                {gear !== undefined && <IconButton size="sm" variant="secondary" icon={gear} onPress={openLogger} />}
+                                <TableSwitch value={s.logger !== false} onValueChange={(v: boolean) => setFeature("logger", v)} />
+                            </View>
+                        }
                     />
                     <TableSwitchRow
                         label="No Spotify auto-pause"
