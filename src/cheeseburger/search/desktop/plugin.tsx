@@ -4,7 +4,6 @@ import { closeMenu, menuOpen, openMenu, Preset } from "./Menu";
 import { CSS } from "./style";
 
 const NAME = "CheeseburgerSearch";
-const ICON = "<svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\"><path d=\"M3 6h11M18 6h3M3 12h3M10 12h11M3 18h13M20 18h1\"/><circle cx=\"16\" cy=\"6\" r=\"2\"/><circle cx=\"8\" cy=\"12\" r=\"2\"/><circle cx=\"18\" cy=\"18\" r=\"2\"/></svg>";
 
 const precise = () => attempt(() => bd().Data.load(NAME, "preciseHas"), undefined) !== false;
 const options = () => ({ preciseHas: precise(), me: myId() });
@@ -57,37 +56,68 @@ function Settings() {
     );
 }
 
-function button(): HTMLElement {
+const ICON_PATHS = "<rect x=\"3\" y=\"5\" width=\"18\" height=\"2\" rx=\"1\"/><rect x=\"3\" y=\"11\" width=\"18\" height=\"2\" rx=\"1\"/><rect x=\"3\" y=\"17\" width=\"18\" height=\"2\" rx=\"1\"/><circle cx=\"15\" cy=\"6\" r=\"2.75\"/><circle cx=\"8\" cy=\"12\" r=\"2.75\"/><circle cx=\"13\" cy=\"18\" r=\"2.75\"/>";
+const CLICKY = "[role=\"button\"], [class*=\"iconWrapper_\"]";
+
+const cleanClass = (el: Element | null | undefined) => String(el?.getAttribute("class") ?? "").split(/\s+/).filter(c => c && !/selected|active|disabled|hidden|cbs-/i.test(c)).join(" ");
+
+function iconsIn(bar: Element): Element[] {
+    return Array.from(bar.children).filter(k => !k.classList.contains("cbs-open") && !!k.querySelector("svg") && (k.matches(CLICKY) || !!k.querySelector(CLICKY)) && !/search_/.test(String(k.getAttribute("class") ?? "")));
+}
+
+function button(ref: Element | null): HTMLElement {
     const b = document.createElement("div");
-    b.className = "cbs-open";
+    const inner = ref ? ref.matches(CLICKY) ? ref : ref.querySelector(CLICKY) : null;
+    const refSvg = inner?.querySelector("svg") ?? ref?.querySelector("svg");
+    const cls = cleanClass(inner);
+    b.setAttribute("class", cls ? `${cls} cbs-open` : "cbs-open cbs-open-plain");
     b.setAttribute("role", "button");
+    b.setAttribute("tabindex", "0");
     b.setAttribute("aria-label", "Advanced search");
-    b.title = "Advanced search (Ctrl+Shift+F)";
-    b.innerHTML = ICON;
-    b.addEventListener("click", e => {
+    const w = refSvg?.getAttribute("width") ?? "24";
+    const h = refSvg?.getAttribute("height") ?? "24";
+    const svgClass = cleanClass(refSvg);
+    b.innerHTML = `<svg${svgClass ? ` class="${svgClass}"` : ""} aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" fill="currentColor" viewBox="0 0 24 24">${ICON_PATHS}</svg>`;
+    const go = (e: Event) => {
+        e.preventDefault();
         e.stopPropagation();
         openMenu(here());
+    };
+    b.addEventListener("click", go);
+    b.addEventListener("keydown", e => {
+        if (e.key === "Enter" || e.key === " ") go(e);
     });
+    let tip = false;
+    quiet(() => {
+        if (typeof bd().UI?.createTooltip === "function") {
+            bd().UI.createTooltip(b, "Advanced search", { side: "bottom" });
+            tip = true;
+        }
+    });
+    if (!tip) b.title = "Advanced search (Ctrl+Shift+F)";
     return b;
 }
 
-function placeButtons() {
-    let placed = false;
-    for (const bar of document.querySelectorAll("[class*=\"searchBar_\"]")) {
-        const box = bar.closest("[class*=\"search_\"]") ?? bar;
-        const parent = box.parentElement;
-        if (!parent) continue;
-        placed = true;
-        if (parent.querySelector(":scope > .cbs-open")) continue;
-        parent.insertBefore(button(), box);
+function headerBars(): Element[] {
+    const found = new Set<Element>();
+    for (const bar of document.querySelectorAll("section [class*=\"toolbar_\"], [class*=\"title_\"] [class*=\"toolbar_\"]")) {
+        if (iconsIn(bar).length >= 2) found.add(bar);
     }
-    if (placed) return;
-    for (const bar of document.querySelectorAll("[class*=\"toolbar_\"]")) {
-        const search = bar.querySelector("[class*=\"search_\"]");
-        if (!search || bar.querySelector(".cbs-open")) continue;
-        let child: Element | null = search;
-        while (child && child.parentElement !== bar) child = child.parentElement;
-        if (child) bar.insertBefore(button(), child);
+    return [...found];
+}
+
+function placeButtons() {
+    for (const bar of headerBars()) {
+        const icons = iconsIn(bar);
+        const kids = Array.from(bar.children);
+        const search = kids.findIndex(k => /search_/.test(String(k.getAttribute("class") ?? "")) || !!k.querySelector("[class*=\"searchBar_\"]"));
+        const before = search >= 0 ? icons.filter(i => kids.indexOf(i) < search) : icons;
+        const last = before[before.length - 1] ?? icons[icons.length - 1];
+        if (!last) continue;
+        const mine = bar.querySelector(":scope > .cbs-open");
+        if (mine && mine.previousElementSibling === last) continue;
+        const b = mine ?? button(icons[0]);
+        bar.insertBefore(b, last.nextSibling);
     }
 }
 

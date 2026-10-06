@@ -26,6 +26,11 @@ let failures = 0;
 let lastError = "";
 let notifyTimer: ReturnType<typeof setTimeout> | null = null;
 let discoverTimer: ReturnType<typeof setInterval> | null = null;
+let barName = "";
+let barOriginal: any = null;
+let hidden = 0;
+const decided = new WeakMap<Function, boolean>();
+const Hidden = () => null;
 
 function byPath(re: RegExp): any {
     const mods: any = (window as any).modules ?? {};
@@ -175,12 +180,20 @@ function MenuNative({ base }: { base: any; }) {
     return ok ? raw : <MenuClone base={base} />;
 }
 
-function ensure() {
+let lastForced = 0;
+
+function ensure(force = false) {
     const now = Date.now();
-    if ((barPatched && rows) || now - lastLook < 2000) return;
+    if (barPatched && rows) return;
+    if (force ? now - lastForced < 500 : now - lastLook < 2000) return;
+    if (force) lastForced = now;
     lastLook = now;
     rows ??= byPath(ROWS) ?? null;
     bar ??= byPath(TOOLBAR) ?? null;
+    if (bar && !barOriginal && typeof bar.default === "function") {
+        barOriginal = bar.default;
+        barName = bar.default.name || "anonymous";
+    }
     if (!barPatched && bar && typeof bar.default === "function") {
         try {
             unpatches.push(instead("default", bar, safeInstead("share toolbar", (args: any[], orig: Function) => {
@@ -209,9 +222,29 @@ function anchorIn(ch: any[]): number {
     return at;
 }
 
+function toolbarShare(type: any): boolean {
+    if (typeof type !== "function" || type === Hidden) return false;
+    const known = decided.get(type);
+    if (known !== undefined) return known;
+    if (!/screen.?share/i.test(type.name ?? "")) {
+        decided.set(type, false);
+        return false;
+    }
+    if (!bar) ensure(true);
+    if (!bar) return false;
+    const yes = type === bar.default || type === barOriginal;
+    decided.set(type, yes);
+    return yes;
+}
+
 function onJsx(args: any[]) {
     const type = args[0];
-    if ((!barPatched || !rows) && typeof type === "function" && (type.name === "VideoButton" || type.name === "ChatButton")) ensure();
+    if (toolbarShare(type)) {
+        hidden++;
+        args[0] = Hidden;
+        return args;
+    }
+    if ((!barPatched || !rows) && typeof type === "function" && (type.name === "VideoButton" || type.name === "ChatButton")) ensure(!barPatched);
     const props = args[1];
     if (!props || typeof props !== "object") return;
     const label = props.accessibilityLabel;
@@ -243,7 +276,7 @@ function afterJsx(args: any[], ret: any) {
 
 export function shareDebug(): string[] {
     return [
-        `share: menu ${rows ? "found" : "not yet"}${rowShape || copyShape ? ` (${[rowShape, copyShape].filter(Boolean).join("; ")})` : ""}, button ${share ? `"${share.label}"` : "not seen yet"}, toolbar ${barPatched ? "removed" : "not yet"}, placed ${placed}, showing ${live}${failures ? `, failed ${failures} (${lastError})` : ""}`,
+        `share: menu ${rows ? "found" : "not yet"}${rowShape || copyShape ? ` (${[rowShape, copyShape].filter(Boolean).join("; ")})` : ""}, button ${share ? `"${share.label}"` : "not seen yet"}, toolbar ${barPatched ? `removed (${barName})` : "not yet"}, hidden at creation ${hidden}, placed ${placed}, showing ${live}${failures ? `, failed ${failures} (${lastError})` : ""}`,
     ];
 }
 
@@ -268,6 +301,8 @@ export default {
         for (const u of unpatches.splice(0)) u();
         barPatched = false;
         bar = null;
+        barName = "";
+        barOriginal = null;
         share = null;
         rows = null;
         live = 0;

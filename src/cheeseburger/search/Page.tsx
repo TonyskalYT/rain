@@ -18,6 +18,12 @@ export function SearchPage() {
         <ScrollView contentContainerStyle={{ paddingVertical: 16, paddingHorizontal: 12, gap: 20 }}>
             <TableRowGroup title="Advanced search">
                 <TableRow label="Open advanced search" subLabel="or type /search in any chat" arrow onPress={() => openAdvanced(navigation)} />
+                <TableSwitchRow
+                    label="Button in discord's search"
+                    subLabel="next to the filter button up top"
+                    value={s.screenButton !== false}
+                    onValueChange={(v: boolean) => s.updateSettings({ screenButton: v })}
+                />
             </TableRowGroup>
             <TableRowGroup title="Discord's filters">
                 <TableSwitchRow

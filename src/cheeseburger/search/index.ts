@@ -5,6 +5,7 @@ import { UserStore } from "@metro/common/stores";
 
 import { advancedStats, openAdvanced } from "./Advanced";
 import { rewriteSearch, rewriteTabs } from "./query";
+import { screenButtonDebug, startScreenButton, stopScreenButton } from "./screen";
 import { searchSettings, useSearchSettings } from "./storage";
 import { startWatch, stopWatch, watchDebug } from "./watch";
 
@@ -128,10 +129,12 @@ export default {
             unregister ??= registerCommand(searchCommand());
         } catch { }
         startWatch();
+        startScreenButton();
     },
     stop() {
         active = false;
         stopWatch();
+        stopScreenButton();
         try {
             unregister?.();
         } catch { }
@@ -153,6 +156,7 @@ export function searchDebug(): string[] {
         `search: ${note}, precise has ${searchSettings.preciseHas !== false ? "on" : "off"}, /search ${unregister ? "on" : "off"}, searches seen ${seen.tabs} tabs / ${seen.get} get / ${seen.other} other${seen.last ? ` (last other ${seen.last})` : ""}, rewrote ${log.length ? `${log.length} recently` : "none yet"}`,
         ...log.map(l => `  ${l}`),
         `advanced: opened ${a.opened} (${a.openVia || "never"}), searches ${a.searches}, errors ${a.errors}${a.lastError ? ` (last: ${a.lastError})` : ""}, last results ${a.lastResults || "none"}, jumps ${a.jumps}${a.jumpVia ? ` via ${a.jumpVia}` : ""}`,
+        screenButtonDebug(),
         ...watchDebug(),
     ];
 }

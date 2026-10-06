@@ -8,8 +8,8 @@ const lastAt = new Map<string, number>();
 const watching = new Set<string>();
 const names = new Map<string, string>();
 const unpatches: (() => unknown)[] = [];
-let candidates: { id: string; path: string; }[] | null = null;
 let poll: ReturnType<typeof setInterval> | null = null;
+const MEMO = Symbol.for("react.memo");
 
 function typeName(t: any): string {
     if (typeof t === "string") return t;
@@ -35,20 +35,22 @@ const isClass = (fn: any) => !!fn?.prototype?.isReactComponent || !!fn?.prototyp
 function watchSearch() {
     const mods = G.modules;
     if (!mods) return;
-    candidates ??= Object.keys(mods)
-        .map(id => ({ id, path: mods[id]?.__filePath }))
-        .filter((c): c is { id: string; path: string; } => typeof c.path === "string" && c.path.startsWith("modules/search/native/") && c.path.endsWith(".tsx"));
-    for (const c of candidates) {
-        if (watching.has(c.path)) continue;
-        const m = mods[c.id];
-        if (!m?.isInitialized) continue;
-        watching.add(c.path);
+    for (const id of Object.keys(mods)) {
+        const m = mods[id];
+        const path = m?.__filePath;
+        if (typeof path !== "string" || !path.startsWith("modules/search/native/") || !path.endsWith(".tsx") || watching.has(path) || !m.isInitialized) continue;
+        watching.add(path);
+        const c = { id, path };
         const exp = m.publicModule?.exports;
-        const fn = exp?.default;
+        const def = exp?.default;
+        const memo = def && typeof def === "object" && def.$$typeof === MEMO && typeof def.type === "function";
+        const owner = memo ? def : exp;
+        const key = memo ? "type" : "default";
+        const fn = memo ? def.type : def;
         if (typeof fn !== "function" || !/^[A-Z]/.test(fn.name ?? "") || isClass(fn)) continue;
-        names.set(c.path, fn.name);
+        names.set(c.path, `${memo ? "memo " : ""}${fn.name}`);
         try {
-            unpatches.push(after("default", exp, safe("search watch", (args: any[], ret: any) => {
+            unpatches.push(after(key, owner, safe("search watch", (args: any[], ret: any) => {
                 if (!ret || typeof ret !== "object" || !("props" in ret)) return;
                 const now = Date.now();
                 if (now - (lastAt.get(c.path) ?? 0) < 3000) return;
@@ -66,7 +68,7 @@ function watchSearch() {
 export function startWatch() {
     if (poll) return;
     safe("search watch start", watchSearch)();
-    poll = setInterval(safe("search watch poll", watchSearch), 4000);
+    poll = setInterval(safe("search watch poll", watchSearch), 8000);
 }
 
 export function stopWatch() {

@@ -210,7 +210,8 @@ export const CSS = `
 .cbs-empty { margin: auto; max-width: 340px; text-align: center; font-size: 14px; line-height: 1.5; color: var(--text-muted, #949ba4); }
 .cbs-empty b { display: block; margin-bottom: 4px; font-size: 16px; color: var(--header-primary, #f2f3f5); }
 .cbs-foot { padding: 6px 0 2px; text-align: center; font-size: 12px; color: var(--text-muted, #949ba4); }
-.cbs-open {
+.cbs-open { cursor: pointer; }
+.cbs-open-plain {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -218,10 +219,9 @@ export const CSS = `
     width: 24px;
     height: 24px;
     margin: 0 8px;
-    cursor: pointer;
     color: var(--interactive-normal, #b5bac1);
 }
-.cbs-open:hover { color: var(--interactive-hover, #dbdee1); }
+.cbs-open-plain:hover { color: var(--interactive-hover, #dbdee1); }
 .cbs-kbd { padding: 1px 5px; border-radius: 4px; font-size: 12px; background: var(--background-tertiary, #1e1f22); }
 .cbs-settings { display: flex; flex-direction: column; gap: 12px; color: var(--text-normal, #dbdee1); font-size: 14px; line-height: 1.5; }
 .cbs-check { display: flex; align-items: center; gap: 8px; cursor: pointer; }

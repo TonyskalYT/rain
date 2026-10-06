@@ -7,6 +7,7 @@ import { SelectedChannelStore } from "@metro/common/stores";
 import { AppState, Dimensions } from "react-native";
 
 import { safe, safeInstead } from "../crash";
+import { rotateLog } from "./storage";
 
 const DISCORD_PATH = "modules/device/native/DeviceOrientation.tsx";
 const RELOCKS = ["lockToPortrait", "unlockAllOrientations", "lockToPortraitUpsideDown"];
@@ -21,6 +22,19 @@ let lastError = "";
 let dimsSub: { remove(): void; } | null = null;
 let retryTimer: ReturnType<typeof setInterval> | null = null;
 const trail: string[] = [];
+const sessionStart = Date.now();
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let lastSession: string[] | null = null;
+
+function previous(): string[] {
+    if (lastSession) return lastSession;
+    try {
+        const l = rotateLog.lines;
+        return Array.isArray(l) ? l.slice(-25) : [];
+    } catch {
+        return [];
+    }
+}
 const unpatches: (() => unknown)[] = [];
 const listeners = new Set<() => void>();
 
@@ -32,9 +46,23 @@ const brief = (v: any) => {
     }
 };
 
+function clock() {
+    const d = new Date();
+    const h = d.getHours();
+    return `${h % 12 || 12}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}.${String(d.getMilliseconds()).padStart(3, "0").slice(0, 1)}`;
+}
+
 function note(text: string) {
-    trail.push(`${new Date().toISOString().slice(17, 23)} ${text}`);
+    lastSession ??= previous();
+    trail.push(`${clock()} ${text}`);
     if (trail.length > 24) trail.splice(0, trail.length - 24);
+    if (saveTimer) return;
+    saveTimer = setTimeout(safe("rotate log save", () => {
+        saveTimer = null;
+        try {
+            rotateLog.lines = [`session ${new Date(sessionStart).toLocaleTimeString()}`, ...trail];
+        } catch { }
+    }), 500);
 }
 
 function mods(): any {
@@ -226,15 +254,80 @@ export function setLandscape(v: boolean) {
         }), 1200);
     } else {
         forced = false;
-        note("rotate off");
+        const w = Dimensions.get("window");
+        note(`rotate off (screen ${Math.round(w.width)}x${Math.round(w.height)})`);
         setIgnoreAutoRotate(false);
-        const target = locker ?? native;
-        if (target) attempt("unlock", () => target.unlockAllOrientations());
         if (focused) focus(null);
         focused = false;
+        backToPortrait();
     }
     listeners.forEach(l => l());
     return true;
+}
+
+function unlock(why: string) {
+    note(why);
+    const t = locker ?? native;
+    if (t) attempt("unlock", () => t.unlockAllOrientations());
+}
+
+function backToPortrait() {
+    const target = native ?? locker;
+    if (portrait()) {
+        unlock("already portrait, unlocking");
+        return;
+    }
+    if (target && typeof target.lockToPortrait === "function") attempt("lockToPortrait", () => target.lockToPortrait());
+    let ticks = 0;
+    let since = 0;
+    retryTimer = setInterval(safe("rotate back", () => {
+        if (forced) return;
+        ticks++;
+        if (portrait()) {
+            since ||= ticks;
+            if (ticks - since < 2) return;
+            if (retryTimer) clearInterval(retryTimer);
+            retryTimer = null;
+            unlock(`portrait after ${(since * 0.4).toFixed(1)}s, unlocking`);
+            watchAfterUnlock();
+            return;
+        }
+        since = 0;
+        if (AppState.currentState !== "active") return;
+        if (ticks % 3 === 0 && target) {
+            note(`still landscape after ${(ticks * 0.4).toFixed(1)}s, asking again`);
+            attempt("lockToPortrait", () => target.lockToPortrait());
+        }
+        if (ticks >= 25) {
+            if (retryTimer) clearInterval(retryTimer);
+            retryTimer = null;
+            note("never got back to portrait, leaving it locked to portrait");
+        }
+    }), 400);
+}
+
+function watchAfterUnlock() {
+    let ticks = 0;
+    retryTimer = setInterval(safe("rotate after unlock", () => {
+        ticks++;
+        if (forced) {
+            if (retryTimer) clearInterval(retryTimer);
+            retryTimer = null;
+            return;
+        }
+        if (!portrait() && AppState.currentState === "active") {
+            if (retryTimer) clearInterval(retryTimer);
+            retryTimer = null;
+            note("flipped back to landscape after unlocking, locking portrait again");
+            const t = native ?? locker;
+            if (t) attempt("lockToPortrait", () => t.lockToPortrait());
+            return;
+        }
+        if (ticks >= 6) {
+            if (retryTimer) clearInterval(retryTimer);
+            retryTimer = null;
+        }
+    }), 400);
 }
 
 export const toggleLandscape = () => setLandscape(!forced);
@@ -259,5 +352,6 @@ export function orientationDebug(): string[] {
         `discord types: ${read(() => discord?.OrientationType)}, lock: ${read(() => discord?.getOrientationLock?.())}, now: ${read(() => discord?.getOrientation?.())}`,
         "rotate log:",
         ...(trail.length ? trail.map(t => `  ${t}`) : ["  none yet"]),
+        ...(previous().length ? ["rotate log from the last session:", ...previous().map(t => `  ${t}`)] : []),
     ];
 }
