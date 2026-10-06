@@ -67,6 +67,7 @@ If the release comes back 404, the `latest` release was left as a draft. Push an
 | `style/` | GX-style bevels: top-left and bottom-right corners cut. `shapes.tsx` draws the cut shape |
 | `updates/` | Hot updates and the "Update now" button |
 | `logger/` | Message logger: keeps deleted messages, shows old versions of edited ones. Replaces the core MessageLogger plugin |
+| `spotify/` | Stops Discord from pausing Spotify (its auto-pause after 30s of mic in a call) |
 
 Details for `split/`:
 - `tiles.tsx` does the layout by writing each tile's `sharedCoords`.
@@ -133,6 +134,10 @@ Details for `split/`:
 - Cheeseburger's logger turns the core plugin off with `stopPlugin("messagelogger")` (tried at start, +5s and +20s, because core plugins start in batches) and remembers it in `cheeseburgerlogger.tookOver`; turning Cheeseburger's logger off (not a hot swap) starts the core plugin again. If the core plugin is on anyway, every Cheeseburger hook steps aside.
 - Deletes use the same trick as the core plugin (MESSAGE_DELETE becomes MESSAGE_EDIT_FAILED_AUTOMOD with "deleted at 1:28 pm", then a MESSAGE_UPDATE redraw, plus a red row style in `RowManager.generate`). Repeat deletes for the same id within 15s are swallowed (`CHEESEBURGER_LOGGER_SKIP`); later ones go through so a deliberate delete can still remove it. MESSAGE_DELETE_BULK is handled too. Deleted and edited ids live on `globalThis` so hot swaps keep them.
 - Edits put old versions above the current text as small struck-through subtext lines (`-# ~~old~~`, last 5). Your own edits only get history while the edit box fix is installed: `startEditMessage`, `editMessage` and MESSAGE_START_EDIT are cleaned back to the current text so history never gets sent.
+
+**Spotify auto-pause (`spotify/`)**
+- Charles's music paused at random on every device for months; unlinking Spotify from Discord stopped it (Oct 6). That's Discord's documented Spotify Auto Pause: after 30s of mic transmission in voice while Spotify plays, the client calls Spotify's Web API `PUT /v1/me/player/pause`, which pauses whatever device is playing. His mic at 1000% with voice activity at -57 dB makes it trigger constantly. Discord has no setting for it.
+- The blocker patches `XMLHttpRequest.prototype.open/send` (RN's fetch and Discord's HTTP both go through it) and turns that PUT into a harmless `GET /v1/me/player` with no body, so Discord sees a success. Blocks are logged (kept on `globalThis.__cheeseburgerSpotifyLog`) and shown in the debug's `spotify` section. Listen-along pauses from Discord are blocked too. On his PC (BetterDiscord) the NoSpotifyPause plugin does the same.
 
 ## Debugging workflow
 

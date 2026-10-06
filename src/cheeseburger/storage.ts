@@ -1,6 +1,6 @@
 import { createPluginStore } from "@api/storage";
 
-export type FeatureId = "volume" | "deafen" | "split" | "rotate" | "style" | "share" | "updates" | "voice" | "logger";
+export type FeatureId = "volume" | "deafen" | "split" | "rotate" | "style" | "share" | "updates" | "voice" | "logger" | "spotify";
 
 export const {
     useStore: useCheeseburger,
@@ -15,4 +15,5 @@ export const {
     updates: true,
     voice: true,
     logger: true,
+    spotify: true,
 });

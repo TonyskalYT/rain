@@ -174,6 +174,12 @@ export default function Settings() {
                         value={s.logger !== false}
                         onValueChange={(v: boolean) => setFeature("logger", v)}
                     />
+                    <TableSwitchRow
+                        label="No Spotify auto-pause"
+                        subLabel="discord pauses spotify after 30s of mic in a call"
+                        value={s.spotify !== false}
+                        onValueChange={(v: boolean) => setFeature("spotify", v)}
+                    />
                 </TableRowGroup>
 
                 <TableRowGroup title="Style">

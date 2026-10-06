@@ -20,6 +20,7 @@ import { pipDebug } from "../split/pip";
 import { labText, onLabReady, pinControlsDebug, pinIconName } from "../split/PipPin";
 import { useSplitViewSettings } from "../split/storage";
 import { hasVideo } from "../split/tiles";
+import { spotifyDebug } from "../spotify";
 import { useCheeseburger } from "../storage";
 import { styleDebug } from "../style";
 import { accentColor, baseColor } from "../style/colors";
@@ -212,6 +213,7 @@ export function debugReport(): string {
         ["voice", voiceDebug],
         ["rotate", rotateDebug],
         ["logger", loggerDebug],
+        ["spotify", spotifyDebug],
     ];
     const out = [`cheeseburger debug ${stamp(Date.now())}`];
     for (const [name, fn] of sections) out.push("", `== ${name}`, ...attempt(name, fn));
