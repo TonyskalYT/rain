@@ -1,5 +1,5 @@
 import { AdvancedFilters, blankFilters, buildRequest, clashes, describe, errorText, filesOf, Kind, KINDS, Leave, LEAVES, linkTo, Pinned, PINS, plainText, readResults, ScopeKind, Sort, SORTS, thumbsOf, When, WHENS } from "../filters";
-import { attempt, bd, channelOf, mount, myId, nameOf, openPath, people, Person, post, quiet, recipients } from "./discord";
+import { attempt, bd, channelOf, markdown, markupClassName, mount, myId, nameOf, openPath, people, Person, post, quiet, recipients } from "./discord";
 
 export interface Preset {
     channelId?: string;
@@ -98,8 +98,52 @@ function Section({ title, children }: { title: string; children?: any; }) {
     );
 }
 
+let GuardClass: any;
+
+function Guard(props: { fallback: any; children: any; }) {
+    if (!GuardClass) {
+        GuardClass = class extends (react().Component as any) {
+            state = { failed: false };
+            static getDerivedStateFromError() {
+                return { failed: true };
+            }
+            render() {
+                const self = this as any;
+                return self.state.failed ? self.props.fallback : self.props.children;
+            }
+        };
+    }
+    return <GuardClass {...props} />;
+}
+
+function Content({ m, onOpen }: { m: any; onOpen: (m: any) => void; }) {
+    const plain = plainText(m, { user: id => nameOf(id), channel: id => channelOf(id)?.name });
+    const raw: string = typeof m.content === "string" && m.content ? m.content : "";
+    const forwarded: string = !raw && typeof m.message_snapshots?.[0]?.message?.content === "string" ? m.message_snapshots[0].message.content : "";
+    const parse = markdown();
+    const source = raw || forwarded;
+    let nodes: any = null;
+    if (parse && source) {
+        nodes = attempt(() => parse(source, true, { channelId: m.channel_id, messageId: m.id, allowLinks: true, allowHeading: true, allowList: true, allowEmojiLinks: false }), null);
+    }
+    const fallback = plain ? <div className="cbs-text">{plain}</div> : null;
+    if (!nodes) return fallback;
+    const block = (e: any) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onOpen(m);
+    };
+    return (
+        <Guard fallback={fallback}>
+            <div className={`cbs-text cbs-markup ${markupClassName()}`} onClickCapture={block}>
+                {forwarded && <span className="cbs-forward">forwarded </span>}
+                {nodes}
+            </div>
+        </Guard>
+    );
+}
+
 function Hit({ m, place, onOpen, onCopy }: { m: any; place: string; onOpen: (m: any) => void; onCopy: (m: any) => void; }) {
-    const content = plainText(m, { user: id => nameOf(id), channel: id => channelOf(id)?.name });
     const thumbs = thumbsOf(m, 256);
     const files = filesOf(m);
     const name = m.author?.global_name ?? m.author?.globalName ?? m.author?.username ?? "someone";
@@ -111,7 +155,7 @@ function Hit({ m, place, onOpen, onCopy }: { m: any; place: string; onOpen: (m: 
                     <span className="cbs-name">{name}</span>
                     <span className="cbs-time">{[stamp(m.timestamp), place].filter(Boolean).join(" · ")}</span>
                 </div>
-                {!!content && <div className="cbs-text">{content}</div>}
+                <Content m={m} onOpen={onOpen} />
                 {thumbs.length > 0 && (
                     <div className="cbs-thumbs">
                         {thumbs.map((t, i) => (

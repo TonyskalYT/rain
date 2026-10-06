@@ -126,6 +126,22 @@ export async function post(url: string, body: any): Promise<{ status: number; bo
     return { status: res.status, body: data };
 }
 
+let parser: any;
+let markupClass: string | undefined;
+
+export function markdown(): ((text: string, inline: boolean, state: any) => any) | null {
+    if (!parser) parser = attempt(() => bd().Webpack.getByKeys("parse", "parseTopic", { searchExports: true }), null);
+    return typeof parser?.parse === "function" ? parser.parse : null;
+}
+
+export function markupClassName(): string {
+    if (markupClass === undefined) {
+        const fits = (m: any) => typeof m?.markup === "string" && typeof m?.inlineFormat === "string";
+        markupClass = attempt(() => bd().Webpack.getModule(fits, { searchExports: true })?.markup, "") ?? "";
+    }
+    return markupClass ?? "";
+}
+
 let go: any;
 
 export function openPath(path: string) {

@@ -6,6 +6,7 @@ import { UserStore } from "@metro/common/stores";
 import { advancedStats, openAdvanced } from "./Advanced";
 import { rewriteSearch, rewriteTabs } from "./query";
 import { searchSettings, useSearchSettings } from "./storage";
+import { startWatch, stopWatch, watchDebug } from "./watch";
 
 const G = globalThis as any;
 const log: string[] = G.__cheeseburgerSearchLog ??= [];
@@ -118,18 +119,6 @@ const searchCommand = (): RainApplicationCommand => ({
     },
 });
 
-function searchFiles(): string[] {
-    const out: string[] = [];
-    const mods: any = G.modules ?? {};
-    for (const id of Object.keys(mods)) {
-        const p = mods[id]?.__filePath;
-        if (typeof p !== "string" || !/search/i.test(p) || !/native|\.tsx$/.test(p) || /emoji|gif|sticker|soundboard|friend|member|discovery|directory|command|emoji/i.test(p)) continue;
-        out.push(`  ${p.replace(/^modules\//, "")}${mods[id].isInitialized ? "" : " (not loaded)"}`);
-        if (out.length >= 40) break;
-    }
-    return out.length ? ["discord search files:", ...out] : ["discord search files: none found"];
-}
-
 export default {
     async start() {
         await waitForHydration(useSearchSettings);
@@ -138,9 +127,11 @@ export default {
         try {
             unregister ??= registerCommand(searchCommand());
         } catch { }
+        startWatch();
     },
     stop() {
         active = false;
+        stopWatch();
         try {
             unregister?.();
         } catch { }
@@ -162,6 +153,6 @@ export function searchDebug(): string[] {
         `search: ${note}, precise has ${searchSettings.preciseHas !== false ? "on" : "off"}, /search ${unregister ? "on" : "off"}, searches seen ${seen.tabs} tabs / ${seen.get} get / ${seen.other} other${seen.last ? ` (last other ${seen.last})` : ""}, rewrote ${log.length ? `${log.length} recently` : "none yet"}`,
         ...log.map(l => `  ${l}`),
         `advanced: opened ${a.opened} (${a.openVia || "never"}), searches ${a.searches}, errors ${a.errors}${a.lastError ? ` (last: ${a.lastError})` : ""}, last results ${a.lastResults || "none"}, jumps ${a.jumps}${a.jumpVia ? ` via ${a.jumpVia}` : ""}`,
-        ...searchFiles(),
+        ...watchDebug(),
     ];
 }

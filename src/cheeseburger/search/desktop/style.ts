@@ -173,6 +173,10 @@ export const CSS = `
     white-space: pre-wrap;
     word-break: break-word;
 }
+.cbs-markup { color: var(--text-normal, #dbdee1); }
+.cbs-markup img.emoji, .cbs-markup img[class*="emoji"] { width: 1.375em; height: 1.375em; object-fit: contain; vertical-align: bottom; }
+.cbs-markup a { color: var(--text-link, #00a8fc); }
+.cbs-forward { font-size: 12px; font-style: italic; color: var(--text-muted, #949ba4); }
 .cbs-thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .cbs-thumb { position: relative; }
 .cbs-thumb img { display: block; width: 128px; height: 128px; object-fit: cover; border-radius: 8px; background: rgba(0, 0, 0, 0.25); }

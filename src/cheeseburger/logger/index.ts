@@ -2,8 +2,9 @@ import { after, before } from "@api/patcher";
 import { waitForHydration } from "@api/storage";
 import { findByName, findByProps, findByStoreName } from "@metro";
 import { FluxDispatcher } from "@metro/common";
-import { ChannelStore, GuildStore, MessageStore, UserStore } from "@metro/common/stores";
+import { ChannelStore, GuildStore, MessageStore, SelectedChannelStore, UserStore } from "@metro/common/stores";
 import { isPluginEnabled, pluginInstances, startPlugin, stopPlugin } from "@plugins";
+import { AppState } from "react-native";
 
 import { caught, safe } from "../crash";
 import { flushSaved, getSaved, loadSaved, putSaved, savedIn, savedInfo, setSavedLimit } from "./saved";
@@ -17,6 +18,8 @@ const REPEAT_MS = 15_000;
 const HISTORY = /^-# (?:~~.*~~|\u200b.*)$/;
 const MARK = "\u2063";
 const MARKED = /^-# \u2063.*$/;
+const NUDGE = "\u2060";
+const NUDGED = /\u2060+$/;
 const RED_BG = 0x26F04747 | 0;
 const RED_GUTTER = 0xFFF04747 | 0;
 const TYPES = new Set(["MESSAGE_DELETE", "MESSAGE_DELETE_BULK", "MESSAGE_UPDATE", "MESSAGE_START_EDIT", "MESSAGE_END_EDIT", "CONNECTION_OPEN", "LOAD_MESSAGES_SUCCESS", "LOAD_MESSAGES_AROUND_SUCCESS", "LOAD_MESSAGES_SUCCESS_CACHED", "LOCAL_MESSAGES_LOADED"]);
@@ -34,6 +37,7 @@ const lastTry = new Map<string, number>();
 const renoted = new Map<string, number>();
 const noteSeen = new Map<string, number>();
 const drawn = new Map<string, number>();
+const firstDraw = new Set<string>();
 let automod: any;
 let highlightOn = false;
 
@@ -142,7 +146,7 @@ function split(content: string): Edit {
     const lines = content.split("\n");
     let i = 0;
     while (i < lines.length && HISTORY.test(lines[i])) i++;
-    return { old: lines.slice(0, i).map(l => (l.startsWith("-# ~~") ? l.slice(5, -2) : l.slice(4))), current: lines.slice(i).filter(l => !MARKED.test(l)).join("\n") };
+    return { old: lines.slice(0, i).map(l => (l.startsWith("-# ~~") ? l.slice(5, -2) : l.slice(4))), current: lines.slice(i).filter(l => !MARKED.test(l)).join("\n").replace(NUDGED, "") };
 }
 
 function channelOf(id: string): any {
@@ -320,16 +324,16 @@ function ghostEvent(channelId: string, id: string, at: number, fresh: boolean) {
     return noteEvent(channelId, id, at);
 }
 
-function redraw(id: string, channelId: string) {
+const emojiOnly = (text: string) => !/[A-Za-z0-9]/.test(text.replace(/<a?:\w+:\d+>/g, ""));
+
+function redraw(id: string, channelId: string, force = false) {
     timers.push(setTimeout(safe("logger redraw", () => {
         const cur = MessageStore.getMessage?.(channelId, id);
         if (!cur) return;
-        FluxDispatcher.dispatch({
-            type: "MESSAGE_UPDATE",
-            otherPluginBypass: true,
-            cheeseburgerLogger: true,
-            message: { id, channel_id: channelId, attachments: Array.isArray(cur.attachments) ? [...cur.attachments] : [], pinned: cur.pinned, flags: cur.flags },
-        });
+        const text: string = typeof cur.content === "string" ? cur.content : "";
+        const message: any = { id, channel_id: channelId, attachments: Array.isArray(cur.attachments) ? [...cur.attachments] : [], pinned: cur.pinned, flags: cur.flags };
+        if (force || text && !emojiOnly(text)) message.content = `${text}${NUDGE}`;
+        FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", otherPluginBypass: true, cheeseburgerLogger: true, message });
     }), 0));
 }
 
@@ -376,16 +380,22 @@ function renoteAll(why: string) {
     }), 1500));
 }
 
-function nudge(id: string, channelId: string, at: number) {
+function nudge(id: string, channelId: string, at: number, round = 1) {
     timers.push(setTimeout(safe("logger nudge", () => {
         if (!running || coreOn() || !ghosts.has(id)) return;
-        if ((drawn.get(id) ?? 0) >= at) {
-            note(`${tag(id)} drawn ${(noteSeen.get(id) ?? 0) >= at ? "with" : "without"} its note`);
+        if ((drawn.get(id) ?? 0) >= at) return;
+        let open = true;
+        try {
+            open = SelectedChannelStore.getChannelId?.() === channelId && AppState.currentState === "active";
+        } catch { }
+        if (!open) {
+            note(`${tag(id)} not on screen, it'll show when the chat opens`);
             return;
         }
-        note(`${tag(id)} not redrawn yet, nudging`);
-        redraw(id, channelId);
-    }), 1500));
+        note(`${tag(id)} not redrawn after ${round === 1 ? "1.5s" : "4s"}, nudging again`);
+        redraw(id, channelId, true);
+        if (round === 1) nudge(id, channelId, at, 2);
+    }), round === 1 ? 1500 : 2500));
 }
 
 function isEdited(m: any): boolean {
@@ -432,8 +442,12 @@ function onDelete(args: any[], e: any) {
     stats.deletes++;
     const at = Date.now();
     args[0] = ghostEvent(channelId, id, at, true);
-    remember(id, channelId, at, rawOf({ ...message, content: typeof message.content === "string" ? message.content.split("\n").filter((l: string) => !MARKED.test(l)).join("\n") : "" }, channelId));
-    note(`deleted ${tag(id)}${isEdited(message) ? " (edited)" : ""}${message.author?.id && message.author.id === myId() ? " (mine)" : ""}`);
+    remember(id, channelId, at, rawOf({ ...message, content: typeof message.content === "string" ? message.content.split("\n").filter((l: string) => !MARKED.test(l)).join("\n").replace(NUDGED, "") : "" }, channelId));
+    let where = "";
+    try {
+        where = SelectedChannelStore.getChannelId?.() === channelId ? AppState.currentState === "active" ? " (on screen)" : " (app in background)" : " (other chat)";
+    } catch { }
+    note(`deleted ${tag(id)}${isEdited(message) ? " (edited)" : ""}${message.author?.id && message.author.id === myId() ? " (mine)" : ""}${where}`);
     redraw(id, channelId);
     checkNote(id);
     nudge(id, channelId, at);
@@ -653,12 +667,19 @@ function paintGhosts() {
         if (!ghosts.has(msg.id)) return;
         drawn.set(msg.id, Date.now());
         cap(drawn, 500);
+        const info = ghostInfo.get(msg.id);
+        const logFirst = !!info && Date.now() - info.at < 60_000 && !firstDraw.has(msg.id);
+        if (logFirst) {
+            if (firstDraw.size > 500) firstDraw.clear();
+            firstDraw.add(msg.id);
+        }
         if (probe.rowTypes.size < 6) probe.rowTypes.add(String(data?.rowType));
         let json = "";
         try {
             json = JSON.stringify(row);
         } catch { }
         const shown = json.split(`${MARK}deleted at`).join("").includes("deleted at");
+        if (logFirst) note(`${tag(msg.id)} redrawn ${Date.now() - info!.at}ms after the delete, ${shown ? "with" : "without"} its note`);
         if (shown) {
             noteSeen.set(msg.id, Date.now());
             cap(noteSeen, 500);

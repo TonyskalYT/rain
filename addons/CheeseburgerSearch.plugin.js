@@ -386,6 +386,19 @@ async function post(url, body) {
   if (!res.ok) throw { status: res.status, body: data };
   return { status: res.status, body: data };
 }
+var parser;
+var markupClass;
+function markdown() {
+  if (!parser) parser = attempt(() => bd().Webpack.getByKeys("parse", "parseTopic", { searchExports: true }), null);
+  return typeof parser?.parse === "function" ? parser.parse : null;
+}
+function markupClassName() {
+  if (markupClass === void 0) {
+    const fits = (m) => typeof m?.markup === "string" && typeof m?.inlineFormat === "string";
+    markupClass = attempt(() => bd().Webpack.getModule(fits, { searchExports: true })?.markup, "") ?? "";
+  }
+  return markupClass ?? "";
+}
 var go;
 function openPath(path) {
   if (go === void 0) go = attempt(() => bd().Webpack.getByStrings("transitionTo - Transitioning to", { searchExports: true }), null);
@@ -787,8 +800,45 @@ function Section({ title, children }) {
     children
   ] });
 }
+var GuardClass;
+function Guard(props) {
+  if (!GuardClass) {
+    GuardClass = class extends react2().Component {
+      state = { failed: false };
+      static getDerivedStateFromError() {
+        return { failed: true };
+      }
+      render() {
+        const self = this;
+        return self.state.failed ? self.props.fallback : self.props.children;
+      }
+    };
+  }
+  return /* @__PURE__ */ jsx(GuardClass, { ...props });
+}
+function Content({ m, onOpen }) {
+  const plain = plainText(m, { user: (id) => nameOf(id), channel: (id) => channelOf(id)?.name });
+  const raw = typeof m.content === "string" && m.content ? m.content : "";
+  const forwarded = !raw && typeof m.message_snapshots?.[0]?.message?.content === "string" ? m.message_snapshots[0].message.content : "";
+  const parse2 = markdown();
+  const source = raw || forwarded;
+  let nodes = null;
+  if (parse2 && source) {
+    nodes = attempt(() => parse2(source, true, { channelId: m.channel_id, messageId: m.id, allowLinks: true, allowHeading: true, allowList: true, allowEmojiLinks: false }), null);
+  }
+  const fallback = plain ? /* @__PURE__ */ jsx("div", { className: "cbs-text", children: plain }) : null;
+  if (!nodes) return fallback;
+  const block = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onOpen(m);
+  };
+  return /* @__PURE__ */ jsx(Guard, { fallback, children: /* @__PURE__ */ jsxs("div", { className: `cbs-text cbs-markup ${markupClassName()}`, onClickCapture: block, children: [
+    forwarded && /* @__PURE__ */ jsx("span", { className: "cbs-forward", children: "forwarded " }),
+    nodes
+  ] }) });
+}
 function Hit({ m, place, onOpen, onCopy }) {
-  const content = plainText(m, { user: (id) => nameOf(id), channel: (id) => channelOf(id)?.name });
   const thumbs = thumbsOf(m, 256);
   const files = filesOf(m);
   const name = m.author?.global_name ?? m.author?.globalName ?? m.author?.username ?? "someone";
@@ -799,7 +849,7 @@ function Hit({ m, place, onOpen, onCopy }) {
         /* @__PURE__ */ jsx("span", { className: "cbs-name", children: name }),
         /* @__PURE__ */ jsx("span", { className: "cbs-time", children: [stamp(m.timestamp), place].filter(Boolean).join(" \xB7 ") })
       ] }),
-      !!content && /* @__PURE__ */ jsx("div", { className: "cbs-text", children: content }),
+      /* @__PURE__ */ jsx(Content, { m, onOpen }),
       thumbs.length > 0 && /* @__PURE__ */ jsx("div", { className: "cbs-thumbs", children: thumbs.map((t, i) => /* @__PURE__ */ jsxs("div", { className: "cbs-thumb", children: [
         /* @__PURE__ */ jsx("img", { src: t.uri, alt: "", loading: "lazy" }),
         t.video && /* @__PURE__ */ jsx("span", { className: "cbs-play", children: "\u25B6" })
@@ -1199,6 +1249,10 @@ var CSS = `
     white-space: pre-wrap;
     word-break: break-word;
 }
+.cbs-markup { color: var(--text-normal, #dbdee1); }
+.cbs-markup img.emoji, .cbs-markup img[class*="emoji"] { width: 1.375em; height: 1.375em; object-fit: contain; vertical-align: bottom; }
+.cbs-markup a { color: var(--text-link, #00a8fc); }
+.cbs-forward { font-size: 12px; font-style: italic; color: var(--text-muted, #949ba4); }
 .cbs-thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .cbs-thumb { position: relative; }
 .cbs-thumb img { display: block; width: 128px; height: 128px; object-fit: cover; border-radius: 8px; background: rgba(0, 0, 0, 0.25); }
