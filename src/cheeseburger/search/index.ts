@@ -7,7 +7,6 @@ import { advancedStats, openAdvanced } from "./Advanced";
 import { rewriteSearch, rewriteTabs } from "./query";
 import { screenButtonDebug, startScreenButton, stopScreenButton } from "./screen";
 import { searchSettings, useSearchSettings } from "./storage";
-import { startWatch, stopWatch, watchDebug } from "./watch";
 
 const G = globalThis as any;
 const log: string[] = G.__cheeseburgerSearchLog ??= [];
@@ -128,12 +127,10 @@ export default {
         try {
             unregister ??= registerCommand(searchCommand());
         } catch { }
-        startWatch();
         startScreenButton();
     },
     stop() {
         active = false;
-        stopWatch();
         stopScreenButton();
         try {
             unregister?.();
@@ -157,6 +154,5 @@ export function searchDebug(): string[] {
         ...log.map(l => `  ${l}`),
         `advanced: opened ${a.opened} (${a.openVia || "never"}), searches ${a.searches}, errors ${a.errors}${a.lastError ? ` (last: ${a.lastError})` : ""}, last results ${a.lastResults || "none"}, jumps ${a.jumps}${a.jumpVia ? ` via ${a.jumpVia}` : ""}`,
         screenButtonDebug(),
-        ...watchDebug(),
     ];
 }

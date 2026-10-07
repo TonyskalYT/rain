@@ -179,7 +179,7 @@ export function startScreenButton() {
     const hook = (args: any[]) => onJsx(args);
     unpatches.push(before("jsx", jsxRuntime, hook));
     unpatches.push(before("jsxs", jsxRuntime, hook));
-    poll = setInterval(safe("search screen look", lookByPath), 6000);
+    poll = setInterval(safe("search screen look", lookByPath), 15000);
 }
 
 export function stopScreenButton() {

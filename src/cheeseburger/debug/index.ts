@@ -3,11 +3,10 @@ import { NativeClientInfoModule } from "@api/native/modules";
 import { waitForHydration } from "@api/storage";
 import { findByStoreName } from "@metro";
 import { SelectedChannelStore, UserStore } from "@metro/common/stores";
-import { pluginInstances } from "@plugins";
 import { getCurrentTheme } from "@plugins/_core/painter/themes";
 import { AppState, Dimensions, PixelRatio, Platform, StatusBar } from "react-native";
 
-import { caught, crashDebug, lastCrashAt, safe } from "../crash";
+import { caught, crashDebug, lastCrashAt, safe, watchdogDebug } from "../crash";
 import { useDeafenButtonSettings } from "../deafen/storage";
 import { loggerDebug } from "../logger";
 import { lookDebug } from "../look";
@@ -32,6 +31,7 @@ import { voiceDebug } from "../voice";
 import { useVoiceSettings } from "../voice/storage";
 import { volumeDebug } from "../volume";
 import { useVolumeBoostSettings } from "../volume/storage";
+import { androidDebug, pluginList, refreshAndroid } from "./android";
 import { debugLink, debugSettings, useDebugLink, useDebugSettings } from "./storage";
 
 const started = Date.now();
@@ -196,7 +196,7 @@ function setup(): string[] {
         `share ${plain(state(useShareSettings))}`,
         `voice ${plain(state(useVoiceSettings))}`,
         `theme ${theme?.id ?? "none"} ${theme?.data?.name ?? ""}, base ${baseColor() ?? "?"}, accent ${accentColor("?")}`,
-        `plugins ${[...pluginInstances.keys()].join(", ").slice(0, 500)}`,
+        ...pluginList(),
     ];
 }
 
@@ -206,7 +206,8 @@ export function debugReport(): string {
         ["device", device],
         ["setup", setup],
         ["call", () => call(n)],
-        ["crashes", crashDebug],
+        ["crashes", () => [...crashDebug(), ...watchdogDebug()]],
+        ["android", androidDebug],
         ["split", () => [...layoutDebug(), ...factoryDebug(), ...pipDebug(), ...pinControlsDebug(), `pin icon: ${pinIconName || "none found"}`]],
         ["style", () => [...styleDebug(), lookDebug(), toolbarDebug()]],
         ["share", shareDebug],
@@ -333,6 +334,7 @@ export function sendDebug(reason = "sent"): Promise<string> {
         const name = `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}-${two(d.getHours())}${two(d.getMinutes())}${two(d.getSeconds())}`;
         let status: string;
         try {
+            await refreshAndroid();
             const text = debugReport();
             await within(put(repo, token, `debug/${name}-${reason}.txt`, text, `${reason} ${name}`), 25000);
             await within(put(repo, token, "latest.txt", text, `latest ${name}`), 25000);

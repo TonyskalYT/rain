@@ -1,7 +1,7 @@
 import { hotStatus } from "@api/hot/status";
 import { BundleUpdaterManager, getNativeModule, NativeFileModule } from "@api/native/modules";
-import { before } from "@api/patcher";
-import { React } from "@metro/common";
+import { before, instead } from "@api/patcher";
+import { FluxDispatcher, React } from "@metro/common";
 import { SelectedChannelStore } from "@metro/common/stores";
 import { AppState } from "react-native";
 
@@ -11,8 +11,25 @@ import { volumeBoostSettings } from "./volume/storage";
 type Kind = "crash" | "error" | "caught" | "closed" | "gone";
 
 interface Entry { at: number; kind: Kind; what: string; stack?: string; n?: number; }
-interface Session { started: number; beat: number; state: string; call?: boolean; rev: string; ended?: string; heap?: number; peak?: number; gains?: string; }
+interface Session {
+    started: number;
+    beat: number;
+    state: string;
+    call?: boolean;
+    rev: string;
+    ended?: string;
+    heap?: number;
+    peak?: number;
+    gains?: string;
+    rss?: number;
+    rssPeak?: number;
+    free?: number;
+    threads?: number;
+    stuck?: number;
+    crumbs?: string[];
+}
 interface Saved { log: Entry[]; session?: Session; }
+interface Memory { rss?: number; peak?: number; threads?: number; free?: number; total?: number; swap?: number; }
 
 const FILE = "rain/cheeseburger-crash.json";
 const MAX = 14;
@@ -30,8 +47,18 @@ let restoring: Promise<void> = Promise.resolve();
 let ready = false;
 let waiting = false;
 let gen = 0;
+let tick: ReturnType<typeof setInterval> | null = null;
+let unflux: (() => unknown) | null = null;
+let lastTick = 0;
+let activeSince = 0;
+let lateSeen = 0;
+let lastType = "";
+let procOk: boolean | null = null;
+let memory: Memory | null = null;
 const listeners = new Set<() => void>();
 const recent = new Map<string, number>();
+const stalls: string[] = g.__cheeseburgerStalls ??= [];
+const slow: { type: string; ms: number; at: number; }[] = g.__cheeseburgerSlowDispatches ??= [];
 
 const current = () => g.__cheeseburgerCrashGen === gen;
 
@@ -271,11 +298,13 @@ async function restore(checked: boolean) {
     if (!checked && prev && !prev.ended) {
         const android = await androidSaysCrashed();
         if (!current()) return;
+        const crumbs = Array.isArray(prev.crumbs) && prev.crumbs.length ? `before it: ${prev.crumbs.slice(-8).join(" | ")}` : undefined;
+        const stuck = typeof prev.stuck === "number" ? `, screen stuck since ${when(prev.stuck)} (android "not responding")` : "";
         if (prev.state === "active" || prev.call || android) {
-            const where = prev.state === "active" ? "open" : prev.call ? "in a call in the background" : "in the background";
-            add("closed", `closed while ${where}, no error caught (${context(prev, android)})`, undefined, prev.beat);
+            const where = prev.state === "active" ? prev.call ? "open in a call" : "open" : prev.call ? "in a call in the background" : "in the background";
+            add("closed", `closed while ${where}${stuck}, no error caught (${context(prev, android)})`, crumbs, prev.beat);
         } else if (typeof prev.beat === "number") {
-            add("gone", `gone while in the background, reopened ${Math.max(0, Math.round((Date.now() - prev.beat) / 60000))}m later (${context(prev, android)})`, undefined, prev.beat);
+            add("gone", `gone while in the background, reopened ${Math.max(0, Math.round((Date.now() - prev.beat) / 60000))}m later (${context(prev, android)})`, crumbs, prev.beat);
         }
     }
     ready = true;
@@ -312,26 +341,169 @@ function gains(): string {
     }
 }
 
+const kb = (text: string, key: string) => {
+    const m = text.match(new RegExp(`^${key}:\\s+(\\d+)`, "m"));
+    return m ? Math.round(Number(m[1]) / 1024) : undefined;
+};
+
+export async function readMemory(): Promise<Memory | null> {
+    if (procOk === false) return null;
+    try {
+        const status = await NativeFileModule.readFile("/proc/self/status", "utf8");
+        if (typeof status !== "string" || !status.includes("VmRSS")) {
+            procOk = false;
+            return null;
+        }
+        procOk = true;
+        const threads = status.match(/^Threads:\s+(\d+)/m);
+        const out: Memory = { rss: kb(status, "VmRSS"), peak: kb(status, "VmHWM"), threads: threads ? Number(threads[1]) : undefined, swap: kb(status, "VmSwap") };
+        try {
+            const info = await NativeFileModule.readFile("/proc/meminfo", "utf8");
+            if (typeof info === "string") {
+                out.free = kb(info, "MemAvailable");
+                out.total = kb(info, "MemTotal");
+            }
+        } catch { }
+        memory = out;
+        return out;
+    } catch {
+        procOk = false;
+        return null;
+    }
+}
+
+const sampleMemory = () => {
+    void readMemory().then(m => {
+        if (!m || !session) return;
+        if (typeof m.rss === "number") {
+            session.rss = m.rss;
+            session.rssPeak = Math.max(session.rssPeak ?? 0, m.peak ?? m.rss);
+        }
+        if (typeof m.free === "number") session.free = m.free;
+        if (typeof m.threads === "number") session.threads = m.threads;
+    }, () => { });
+};
+
 function touch(state?: string) {
     if (!session) return;
+    if (state && state !== session.state) crumb(`app ${state === "active" ? "opened" : state}`);
     if (state) session.state = state;
     session.beat = Date.now();
-    session.call = inCall();
+    const call = inCall();
+    if (call !== !!session.call) crumb(call ? "joined a call" : "left the call");
+    session.call = call;
     const heap = heapMb();
     if (heap !== undefined) {
         session.heap = heap;
         session.peak = Math.max(session.peak ?? 0, heap);
     }
     session.gains = gains();
+    sampleMemory();
     void write();
 }
 
 function context(prev: Session, android: boolean | null): string {
     const parts = [`sentry ${android === null ? "unknown" : android ? "crash" : "clean"}`];
     if (typeof prev.heap === "number") parts.push(`heap ${prev.heap}mb (peak ${prev.peak ?? prev.heap}mb)`);
+    if (typeof prev.rss === "number") parts.push(`app memory ${prev.rss}mb (peak ${prev.rssPeak ?? prev.rss}mb)${typeof prev.free === "number" ? `, phone free ${prev.free}mb` : ""}${typeof prev.threads === "number" ? `, ${prev.threads} threads` : ""}`);
     if (prev.gains) parts.push(prev.gains);
     if (typeof prev.started === "number" && typeof prev.beat === "number") parts.push(`up ${Math.max(0, Math.round((prev.beat - prev.started) / 60000))}m`);
     return parts.join(", ");
+}
+
+const secs = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+
+function crumb(line: string) {
+    if (!session) return;
+    const list = session.crumbs ??= [];
+    list.push(`${when(Date.now()).replace(/^\S+ /, "")} ${line}`.slice(0, 100));
+    if (list.length > 12) list.splice(0, list.length - 12);
+}
+
+function stall(line: string) {
+    stalls.push(`${when(Date.now())} ${line}`);
+    if (stalls.length > 15) stalls.splice(0, stalls.length - 15);
+    crumb(line);
+    soon();
+}
+
+const onTick = safe("crash tick", () => {
+    const now = Date.now();
+    const gap = now - lastTick;
+    lastTick = now;
+    lateSeen = 0;
+    if (session && typeof session.stuck === "number") {
+        stall(`screen froze ${secs(now - session.stuck)}, js kept running`);
+        session.stuck = undefined;
+        return;
+    }
+    if (gap > 2500 && activeSince && now - activeSince > gap + 500 && AppState.currentState === "active") {
+        stall(`app froze ${secs(gap - 1000)}${lastType ? ` (last action ${lastType})` : ""}`);
+    }
+});
+
+const onAppState = safe("crash state", (s: string) => {
+    activeSince = s === "active" ? Date.now() : 0;
+    touch(s);
+});
+
+const timeFlux = safeInstead("crash flux", (args: any[], orig: Function) => {
+    const start = Date.now();
+    const type = typeof args[0]?.type === "string" ? args[0].type : "";
+    if (session && session.stuck === undefined && activeSince && AppState.currentState === "active") {
+        const since = Math.max(lastTick, activeSince);
+        if (start - since > 1500) {
+            if (!lateSeen) lateSeen = start;
+            else if (start - lateSeen > 400 && start - since > 4000) {
+                session.stuck = since;
+                crumb(`screen stuck for ${secs(start - since)} while js still runs`);
+                void write();
+            }
+        }
+    }
+    if (type) lastType = type;
+    const ret = orig(...args);
+    const ms = Date.now() - start;
+    if (ms >= 400) {
+        slow.push({ type: type || "?", ms, at: start });
+        if (slow.length > 12) slow.splice(0, slow.length - 12);
+        crumb(`${type || "action"} took ${secs(ms)}`);
+        soon();
+    }
+    return ret;
+});
+
+function startWatchdog() {
+    lastTick = Date.now();
+    activeSince = AppState.currentState === "active" ? Date.now() : 0;
+    tick = setInterval(onTick, 1000);
+    try {
+        unflux = instead("dispatch", FluxDispatcher, timeFlux);
+    } catch {
+        unflux = null;
+    }
+    sampleMemory();
+}
+
+function stopWatchdog() {
+    if (tick) clearInterval(tick);
+    tick = null;
+    try {
+        unflux?.();
+    } catch { }
+    unflux = null;
+}
+
+export function watchdogDebug(): string[] {
+    const m = memory;
+    return [
+        `memory: ${m ? `app ${m.rss ?? "?"}mb (peak ${m.peak ?? "?"}mb), ${m.threads ?? "?"} threads, swap ${m.swap ?? "?"}mb, phone free ${m.free ?? "?"} of ${m.total ?? "?"}mb` : procOk === false ? "can't read /proc" : "not read yet"}`,
+        `freezes: ${stalls.length ? "" : "none seen"}`,
+        ...stalls.map(s => `  ${s}`),
+        `slow actions (over 0.4s): ${slow.length ? "" : "none"}`,
+        ...slow.map(s => `  ${when(s.at)} ${s.type} ${secs(s.ms)}`),
+        `last moments kept for a crash: ${session?.crumbs?.length ? session.crumbs.join(" | ") : "nothing yet"}`.slice(0, 1200),
+    ];
 }
 
 export function startCrashLog() {
@@ -345,14 +517,17 @@ export function startCrashLog() {
         session = handoff.session;
         ready = !!handoff.ready;
         if (!ready) begin(true);
+        crumb(`cheeseburger updated to ${hotStatus.revision.slice(0, 7)}`);
     } else {
         session = { started: Date.now(), beat: Date.now(), state: AppState.currentState ?? "active", call: inCall(), rev: hotStatus.revision };
+        crumb("discord started");
         begin(false);
     }
     beat = setInterval(safe("crash beat", () => {
         if (AppState.currentState === "active") touch();
     }), 30_000);
-    appSub = AppState.addEventListener("change", safe("crash state", (s: string) => touch(s)));
+    appSub = AppState.addEventListener("change", onAppState);
+    startWatchdog();
     try {
         if (typeof BundleUpdaterManager?.reload === "function") {
             unreload = before("reload", BundleUpdaterManager, safe("crash reload", () => {
@@ -368,6 +543,7 @@ export function startCrashLog() {
 export function stopCrashLog() {
     if (beat) clearInterval(beat);
     beat = null;
+    stopWatchdog();
     appSub?.remove();
     appSub = null;
     try {
