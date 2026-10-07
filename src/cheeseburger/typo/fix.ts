@@ -35,42 +35,72 @@ const PROTECT = /```[\s\S]*?```|`[^`\n]*`|<[^<>\s]*>|https?:\/\/\S+|\bwww\.\S+|:
 const WORD = /[A-Za-z]+(?:'[A-Za-z]+)*/g;
 const EDGE_BEFORE = /[\w:;=<>^'\\/.]/;
 const EDGE_AFTER = /[\w:;=<>^'\\/]/;
-const DOMINANT = 30;
+const LETTERS = "abcdefghijklmnopqrstuvwxyz";
+const CLEAR = 4;
 
 export const nearKeys = (c: string) => NEAR[c] ?? "";
 
-function candidates(w: string): Map<string, boolean> {
-    const out = new Map<string, boolean>();
-    for (let i = 0; i < w.length; i++) {
-        for (const n of nearKeys(w[i])) out.set(w.slice(0, i) + n + w.slice(i + 1), false);
-        if (w.length > 3) {
+function oneSlip(w: string, out: Map<string, number>, base: number, wide: boolean) {
+    const n = w.length;
+    const put = (c: string, weight: number) => {
+        const v = weight * base;
+        if (c !== w && v > 0 && v > (out.get(c) ?? 0)) out.set(c, v);
+    };
+    for (let i = 0; i < n; i++) {
+        const c = w[i];
+        const near = nearKeys(c);
+        for (const ch of LETTERS) {
+            if (ch === c) continue;
+            if (near.includes(ch)) put(w.slice(0, i) + ch + w.slice(i + 1), 1);
+            else if (wide && n >= 4) put(w.slice(0, i) + ch + w.slice(i + 1), 0.1);
+        }
+        if (n > 2) {
             const prev = w[i - 1];
             const next = w[i + 1];
-            const c = w[i];
-            if (prev === c || next === c || prev && nearKeys(prev).includes(c) || next && nearKeys(next).includes(c)) out.set(w.slice(0, i) + w.slice(i + 1), false);
+            const cut = w.slice(0, i) + w.slice(i + 1);
+            if (prev === c || next === c) put(cut, 0.8);
+            else if (prev && nearKeys(prev).includes(c) || next && nearKeys(next).includes(c)) put(cut, 0.5);
+            else if (wide && n >= 5) put(cut, 0.1);
+        }
+        if (i + 1 < n && c !== w[i + 1] && n > 2) put(w.slice(0, i) + w[i + 1] + c + w.slice(i + 2), 1.3);
+    }
+    if (wide && n >= 3) {
+        for (let i = 0; i <= n; i++) {
+            for (const ch of LETTERS) put(w.slice(0, i) + ch + w.slice(i), ch === w[i - 1] || ch === w[i] ? 0.6 : 0.3);
         }
     }
-    for (let i = 0; i + 1 < w.length; i++) {
-        if (w[i] !== w[i + 1] && w.length > 2) out.set(w.slice(0, i) + w[i + 1] + w[i] + w.slice(i + 2), true);
+}
+
+function pick(word: string, found: Map<string, number>, words: Words): string | null {
+    let first: [string, number] | null = null;
+    let second = 0;
+    const cap = word.length >= 6 ? 30000 : 10000;
+    for (const [c, weight] of found) {
+        if (c.length !== word.length && c.length < 3) continue;
+        const r = words.rank(c);
+        if (r === undefined || r > cap || weight < 0.5 && (r > 3000 || word.length < 4)) continue;
+        const score = weight / r;
+        if (!first || score > first[1]) {
+            if (first) second = Math.max(second, first[1]);
+            first = [c, score];
+        } else {
+            second = Math.max(second, score);
+        }
     }
-    out.delete(w);
-    return out;
+    if (!first || first[1] < second * CLEAR) return null;
+    return first[0];
 }
 
 export function best(word: string, words: Words): string | null {
-    const found: { w: string; r: number; swap: boolean; }[] = [];
-    for (const [c, swap] of candidates(word)) {
-        if (c.length !== word.length && c.length < 3) continue;
-        const r = words.rank(c);
-        if (r !== undefined && r <= (word.length >= 6 ? 30000 : 10000)) found.push({ w: c, r, swap });
-    }
-    if (!found.length) return null;
-    found.sort((a, b) => a.r - b.r);
-    const [first, second] = found;
-    if (!second || first.r * DOMINANT <= second.r) return first.w;
-    const swaps = found.filter(f => f.swap);
-    if (swaps.length === 1 && swaps[0].r <= first.r * 10) return swaps[0].w;
-    return null;
+    const found = new Map<string, number>();
+    oneSlip(word, found, 1, true);
+    const one = pick(word, found, words);
+    if (one || word.length < 6) return one;
+    const two = new Map<string, number>();
+    for (const [c, weight] of found) if (weight >= 0.5) oneSlip(c, two, weight * 0.5, false);
+    two.delete(word);
+    for (const [c, weight] of found) if ((two.get(c) ?? 0) < weight) two.set(c, weight);
+    return pick(word, two, words);
 }
 
 function shape(original: string, fixed: string): string {

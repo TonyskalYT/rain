@@ -1,90 +1,83 @@
 import { React } from "@metro/common";
-import { TableRow, TableRowGroup, Text } from "@metro/common/components";
-import { ScrollView, View } from "react-native";
+import { Text } from "@metro/common/components";
+import { Pressable, ScrollView, View } from "react-native";
 
 import { safe } from "../crash";
-import { themeColor } from "../style/colors";
+import { accentColor, themeColor } from "../style/colors";
 import { relearn, typoPairs } from ".";
 import { typoSettings, useTypoSettings } from "./storage";
 import { wordStatus } from "./words";
 
+type Tab = "fixes" | "learned" | "never";
+
+const textColor = () => themeColor("TEXT_DEFAULT") ?? themeColor("TEXT_NORMAL") ?? themeColor("TEXT_PRIMARY");
+const mutedColor = () => themeColor("TEXT_MUTED") ?? themeColor("TEXT_SECONDARY");
+const chipColor = () => themeColor("BACKGROUND_MODIFIER_ACCENT") ?? themeColor("BACKGROUND_TERTIARY") ?? "#ffffff1f";
+const cardColor = () => themeColor("CARD_SECONDARY_BG") ?? themeColor("BACKGROUND_SECONDARY") ?? "#ffffff12";
+
 const time = (t: number) => {
     const d = new Date(t);
     const h = d.getHours();
-    const sameDay = d.toDateString() === new Date().toDateString();
-    return `${sameDay ? "" : `${d.getMonth() + 1}/${d.getDate()} `}${h % 12 || 12}:${String(d.getMinutes()).padStart(2, "0")} ${h < 12 ? "am" : "pm"}`;
+    const day = d.toDateString() === new Date().toDateString() ? "" : `${d.getMonth() + 1}/${d.getDate()} `;
+    return `${day}${h % 12 || 12}:${String(d.getMinutes()).padStart(2, "0")}`;
 };
 
-function block(word: string) {
+function toggle(word: string) {
     const w = word.toLowerCase();
-    typoSettings.never = [...new Set([...(typoSettings.never ?? []), w])];
+    const list = typoSettings.never ?? [];
+    typoSettings.never = list.includes(w) ? list.filter(x => x !== w) : [...list, w];
     relearn();
 }
 
-function unblock(word: string) {
-    typoSettings.never = (typoSettings.never ?? []).filter(w => w !== word);
-    relearn();
+function Chip({ label, on, onPress }: { label: string; on: boolean; onPress: () => void; }) {
+    return (
+        <Pressable onPress={onPress} style={{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14, backgroundColor: on ? accentColor() : chipColor() }}>
+            <Text variant="text-sm/semibold" color="text-default" style={{ color: on ? "#ffffff" : textColor() ?? undefined }}>{label}</Text>
+        </Pressable>
+    );
+}
+
+function Line({ left, right, off, onPress }: { left: string; right: string; off: boolean; onPress: () => void; }) {
+    const muted = mutedColor();
+    return (
+        <Pressable onPress={onPress} style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 7, gap: 8 }}>
+            <Text variant="text-sm/medium" color="text-default" style={{ flex: 1, color: textColor() ?? undefined, opacity: off ? 0.45 : 1, textDecorationLine: off ? "line-through" : "none" }} numberOfLines={1}>{left}</Text>
+            <Text variant="text-xs/medium" color="text-muted" style={muted ? { color: muted } : undefined}>{right}</Text>
+        </Pressable>
+    );
 }
 
 export function TypoPage() {
     const s = useTypoSettings();
+    const [tab, setTab] = React.useState<Tab>("fixes");
     const [, force] = React.useReducer((n: number) => n + 1, 0);
-    const muted = themeColor("TEXT_MUTED") ?? themeColor("TEXT_SECONDARY");
+    const muted = mutedColor();
+    const never = new Set(s.never ?? []);
     const log = [...(s.log ?? [])].reverse();
     const pairs = typoPairs();
-    const never = s.never ?? [];
+    const tap = (w: string) => safe("typo toggle", () => {
+        toggle(w);
+        force();
+    });
+    const rows = tab === "fixes"
+        ? log.map((l, i) => <Line key={`${l.at}-${i}`} left={`${l.from} → ${l.to}`} right={`${time(l.at)}${l.how === "your edits" ? " · yours" : ""}`} off={never.has(l.from.toLowerCase())} onPress={tap(l.from)} />)
+        : tab === "learned"
+            ? pairs.map(p => <Line key={p.from} left={`${p.from} → ${p.to}`} right={p.star ? "from *fix" : `${p.n}x`} off={never.has(p.from)} onPress={tap(p.from)} />)
+            : [...never].map(w => <Line key={w} left={w} right="blocked" off={false} onPress={tap(w)} />);
+    const empty = tab === "fixes" ? "nothing fixed yet" : tab === "learned" ? "nothing yet, comes from the logger's saved edits of your messages" : "nothing blocked";
     return (
-        <ScrollView contentContainerStyle={{ paddingVertical: 16, paddingHorizontal: 12, gap: 20 }}>
-            <View style={{ paddingHorizontal: 8 }}>
-                <Text variant="text-sm/medium" color="text-muted" style={muted ? { color: muted } : undefined}>
-                    {`fixes neighbor key slips when you hit send, only when there's one clear word. ${wordStatus}. tap a fix to never fix that word again`}
-                </Text>
+        <ScrollView contentContainerStyle={{ padding: 12, gap: 10 }}>
+            <Text variant="text-xs/medium" color="text-muted" style={muted ? { color: muted } : undefined}>
+                {`${wordStatus} · ${log.length} fixes · ${pairs.length} learned · tap one to block or unblock it`}
+            </Text>
+            <View style={{ flexDirection: "row", gap: 6 }}>
+                <Chip label={`fixes ${log.length}`} on={tab === "fixes"} onPress={() => setTab("fixes")} />
+                <Chip label={`learned ${pairs.length}`} on={tab === "learned"} onPress={() => setTab("learned")} />
+                <Chip label={`blocked ${never.size}`} on={tab === "never"} onPress={() => setTab("never")} />
             </View>
-            <TableRowGroup title={`Recent fixes (${log.length})`}>
-                {log.length
-                    ? log.slice(0, 40).map((l, i) => (
-                        <TableRow
-                            key={`${l.at}-${i}`}
-                            label={`${l.from} → ${l.to}`}
-                            subLabel={`${time(l.at)}, ${l.how}${never.includes(l.from.toLowerCase()) ? ", won't fix again" : ""}`}
-                            onPress={safe("typo block", () => {
-                                block(l.from);
-                                force();
-                            })}
-                        />
-                    ))
-                    : <TableRow label="nothing fixed yet" />}
-            </TableRowGroup>
-            <TableRowGroup title={`Learned from your edits (${pairs.length})`}>
-                {pairs.length
-                    ? pairs.slice(0, 60).map(p => (
-                        <TableRow
-                            key={p.from}
-                            label={`${p.from} → ${p.to}`}
-                            subLabel={`you fixed it ${p.n}x`}
-                            onPress={safe("typo block pair", () => {
-                                block(p.from);
-                                force();
-                            })}
-                        />
-                    ))
-                    : <TableRow label="nothing yet" subLabel="comes from the message logger's saved edits of your messages" />}
-            </TableRowGroup>
-            <TableRowGroup title={`Never fix (${never.length})`}>
-                {never.length
-                    ? never.map(w => (
-                        <TableRow
-                            key={w}
-                            label={w}
-                            subLabel="tap to allow fixing again"
-                            onPress={safe("typo unblock", () => {
-                                unblock(w);
-                                force();
-                            })}
-                        />
-                    ))
-                    : <TableRow label="nothing" subLabel="words you change back by editing land here" />}
-            </TableRowGroup>
+            <View style={{ borderRadius: 12, overflow: "hidden", backgroundColor: cardColor(), paddingVertical: 4 }}>
+                {rows.length ? rows : <Line left={empty} right="" off={false} onPress={() => { }} />}
+            </View>
         </ScrollView>
     );
 }

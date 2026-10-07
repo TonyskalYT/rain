@@ -2,7 +2,7 @@ import { NativeFileModule } from "@api/native/modules";
 
 const URL = "https://github.com/TonyskalYT/rain/releases/latest/download/cheeseburger-words.txt";
 const FILE = "rain/cheeseburger-words.txt";
-const VERSION = "#cheeseburger-words v3";
+const VERSION = "#cheeseburger-words v4";
 
 export interface Dictionary { targets: Map<string, number>; rare: Map<string, number>; slang: Set<string>; }
 

@@ -1,6 +1,6 @@
 import { wordsIn } from "./fix";
 
-export interface Pair { from: string; to: string; n: number; }
+export interface Pair { from: string; to: string; n: number; star?: boolean; }
 
 export function distance(a: string, b: string): number {
     const d: number[][] = [];
