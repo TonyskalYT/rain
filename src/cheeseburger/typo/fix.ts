@@ -42,11 +42,12 @@ const EDGE_BEFORE = /[\w:;=<>^'\\/.]/;
 const EDGE_AFTER = /[\w:;=<>^'\\/]/;
 const LETTERS = "abcdefghijklmnopqrstuvwxyz";
 const CLEAR = 4;
+const SECOND = 0.05;
 const KEEP_RARE = 3;
 
 export const nearKeys = (c: string) => NEAR[c] ?? "";
 
-function oneSlip(w: string, out: Map<string, number>, base: number, wide: boolean) {
+function oneSlip(w: string, out: Map<string, number>, base: number, wide: boolean, inserts = wide) {
     const n = w.length;
     const put = (c: string, weight: number) => {
         const v = weight * base;
@@ -70,7 +71,7 @@ function oneSlip(w: string, out: Map<string, number>, base: number, wide: boolea
         }
         if (i + 1 < n && c !== w[i + 1] && n > 2) put(w.slice(0, i) + w[i + 1] + c + w.slice(i + 2), 1.3);
     }
-    if (wide && n >= 3) {
+    if (inserts && n >= 3) {
         for (let i = 0; i <= n; i++) {
             for (const ch of LETTERS) put(w.slice(0, i) + ch + w.slice(i), ch === w[i - 1] || ch === w[i] ? 0.6 : 0.3);
         }
@@ -81,37 +82,41 @@ export const prob = (rank: number) => 1 / (11 * rank);
 
 const liftOf = (words: Words, at: Around, w: string) => words.lift ? words.lift(at.prev, w, at.next) : 1;
 
-function pick(word: string, found: Map<string, number>, words: Words, at: Around, keep: number, keyboardOnly: boolean): string | null {
-    let first: [string, number] | null = null;
-    let second = 0;
-    const cap = word.length >= 6 ? 30000 : 10000;
+export function scored(word: string, found: Map<string, number>, words: Words, at: Around, keyboardOnly = false): [string, number][] {
+    const out: [string, number][] = [];
+    const cap = word.length >= 6 ? 30000 : word.length >= 4 ? 20000 : 10000;
     for (const [c, weight] of found) {
         if (c.length !== word.length && c.length < 3) continue;
         if (keyboardOnly && weight < 0.5) continue;
         const r = words.rank(c);
         if (r === undefined || r > cap || weight < 0.5 && (r > 3000 || word.length < 4)) continue;
-        const score = weight * prob(r) * liftOf(words, at, c);
-        if (!first || score > first[1]) {
-            if (first) second = Math.max(second, first[1]);
-            first = [c, score];
-        } else {
-            second = Math.max(second, score);
-        }
+        out.push([c, weight * prob(r) * liftOf(words, at, c)]);
     }
-    if (!first || first[1] < second * CLEAR || first[1] <= keep) return null;
+    return out.sort((x, y) => y[1] - x[1]);
+}
+
+function pick(word: string, found: Map<string, number>, words: Words, at: Around, keep: number, keyboardOnly: boolean): string | null {
+    const [first, second] = scored(word, found, words, at, keyboardOnly);
+    if (!first || second && first[1] < second[1] * CLEAR || first[1] <= keep) return null;
     return first[0];
 }
 
-export function best(word: string, words: Words, at: Around = { prev: "", next: "" }, keep = 0, keyboardOnly = false): string | null {
+export function slips(word: string, wide = true): Map<string, number> {
     const found = new Map<string, number>();
-    oneSlip(word, found, 1, !keyboardOnly);
-    const one = pick(word, found, words, at, keep, keyboardOnly);
-    if (one || word.length < 6 || keyboardOnly) return one;
-    const two = new Map<string, number>();
-    for (const [c, weight] of found) if (weight >= 0.5) oneSlip(c, two, weight * 0.5, false);
-    two.delete(word);
-    for (const [c, weight] of found) if ((two.get(c) ?? 0) < weight) two.set(c, weight);
-    return pick(word, two, words, at, keep, false);
+    oneSlip(word, found, 1, wide);
+    if (word.length < 4 || !wide) return found;
+    const all = new Map(found);
+    for (const [c, weight] of found) {
+        if (weight >= 0.5) oneSlip(c, all, weight * SECOND, false, word.length >= 5);
+        else if (weight >= 0.3 && word.length >= 5) oneSlip(c, all, weight * SECOND, false);
+    }
+    all.delete(word);
+    for (const [c, weight] of found) if ((all.get(c) ?? 0) < weight) all.set(c, weight);
+    return all;
+}
+
+export function best(word: string, words: Words, at: Around = { prev: "", next: "" }, keep = 0, keyboardOnly = false): string | null {
+    return pick(word, slips(word, !keyboardOnly), words, at, keep, keyboardOnly);
 }
 
 function shape(original: string, fixed: string): string {

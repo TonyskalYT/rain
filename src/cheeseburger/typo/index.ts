@@ -9,6 +9,7 @@ import { allSaved, loadSaved } from "../logger/saved";
 import { fixText, prob, Words, wordsIn } from "./fix";
 import { choosePairs, collectSwaps, distance, Pair } from "./learn";
 import { typoSettings, useTypoSettings } from "./storage";
+import { getMine, loadMine, study, studyState } from "./study";
 import { Dictionary, getDictionary, loadDictionary, Row, wordStatus } from "./words";
 
 const G = globalThis as any;
@@ -17,7 +18,8 @@ const timers: ReturnType<typeof setTimeout>[] = [];
 let pairs: Map<string, Pair> = G.__cheeseburgerTypoPairs ??= new Map();
 let personal: Map<string, Row> = new Map();
 let hooked = "not yet";
-const stats = { sent: 0, fixed: 0, undone: 0, taught: 0, histories: 0, versions: 0, swaps: 0, candidates: 0, mine: 0, words: 0 };
+const stats = { sent: 0, fixed: 0, undone: 0, taught: 0, histories: 0, versions: 0, swaps: 0, candidates: 0, mine: 0, words: 0, history: 0, stars: 0 };
+let alive = false;
 const lastSent = new Map<string, { text: string; at: number; }>();
 const KNOWN_AFTER = 3;
 const K = 20;
@@ -33,7 +35,7 @@ function myId(): string | undefined {
 }
 
 const never = () => new Set(typoSettings.never ?? []);
-const clamp = (v: number) => Math.min(50, Math.max(0.02, v));
+const clamp = (v: number) => Math.min(20, Math.max(0.05, v));
 
 function chance(d: Dictionary, w: string): number {
     if (w === "$") return 0.08;
@@ -66,7 +68,7 @@ function words(): Words | null {
         name: w => d.names.has(w),
         skip: w => blocked.has(w) || (sent[w] ?? 0) >= KNOWN_AFTER && !d.targets.has(w),
         personal: w => blocked.has(w) ? undefined : pairs.get(w)?.to,
-        lift: d.context.size || personal.size ? (prev, w, next) => (prev ? side(d, prev, w) : 1) * (next ? side(d, w, next) : 1) : undefined,
+        lift: d.context.size || personal.size ? (prev, w, next) => Math.pow((prev ? side(d, prev, w) : 1) * (next ? side(d, w, next) : 1), 0.75) : undefined,
     };
 }
 
@@ -137,6 +139,25 @@ export function relearn(): number {
         addText(corpus, list[list.length - 1]);
     }
     for (const t of typoSettings.recent ?? []) addText(corpus, t);
+    const stars = new Map<string, Map<string, number>>();
+    const history = getMine()?.texts ?? [];
+    stats.history = history.length;
+    for (const [, text] of history) addText(corpus, text);
+    const ordered = [...history].sort((x, y) => x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : x[2] - y[2]);
+    for (let i = 1; i < ordered.length; i++) {
+        const [ch, text, at] = ordered[i];
+        const [pch, ptext, pat] = ordered[i - 1];
+        if (ch !== pch || at - pat > 300_000) continue;
+        const m = text.match(STAR);
+        if (!m) continue;
+        const to = (m[1] ?? m[2]).toLowerCase();
+        const from = starPair(d, ptext, to);
+        if (!from || blocked.has(from)) continue;
+        const row = stars.get(from) ?? new Map<string, number>();
+        row.set(to, (row.get(to) ?? 0) + 1);
+        stars.set(from, row);
+    }
+    stats.stars = stars.size;
     personal = corpus;
     const found = collectSwaps([...histories.values()]);
     stats.histories = histories.size;
@@ -150,6 +171,10 @@ export function relearn(): number {
         return true;
     });
     pairs = new Map(chosen.map(p => [p.from, p]));
+    for (const [from, row] of stars) {
+        const [to, n] = [...row].sort((x, y) => y[1] - x[1])[0];
+        if (!pairs.has(from)) pairs.set(from, { from, to, n, star: true });
+    }
     for (const [from, to] of Object.entries(typoSettings.taught ?? {})) {
         if (!blocked.has(from)) pairs.set(from, { from, to, n: pairs.get(from)?.n ?? 1, star: true });
     }
@@ -180,13 +205,19 @@ function countSent(text: string) {
     typoSettings.sent = sent;
 }
 
+function starPair(d: Dictionary, prev: string, fix: string): string | null {
+    const to = fix.toLowerCase();
+    if (!(d.targets.has(to) || d.slang.has(to))) return null;
+    const close = [...new Set(wordsIn(prev))].filter(w => w !== to && !w.includes("'") && !d.targets.has(w) && !d.slang.has(w) && distance(w, to) <= 2);
+    return close.length === 1 ? close[0] : null;
+}
+
 function learnStar(prev: string, fix: string) {
     const d = getDictionary();
-    const to = fix.toLowerCase();
-    if (!d || !(d.targets.has(to) || d.slang.has(to))) return;
-    const close = [...new Set(wordsIn(prev))].filter(w => w !== to && !w.includes("'") && !d.targets.has(w) && !d.slang.has(w) && distance(w, to) <= 2);
-    if (close.length !== 1) return;
-    typoSettings.taught = { ...(typoSettings.taught ?? {}), [close[0]]: to };
+    if (!d) return;
+    const from = starPair(d, prev, fix);
+    if (!from) return;
+    typoSettings.taught = { ...(typoSettings.taught ?? {}), [from]: fix.toLowerCase() };
     stats.taught++;
     relearn();
 }
@@ -243,7 +274,14 @@ export default {
         unpatches.push(before("sendMessage", actions, onSend));
         if (typeof actions.editMessage === "function") unpatches.push(before("editMessage", actions, onEdit));
         hooked = "on";
+        alive = true;
         loadDictionary().then(safe("typo words", () => {
+            loadMine().then(safe("typo mine", () => relearn()), () => { });
+            timers.push(setTimeout(safe("typo study", () => {
+                const me = myId();
+                if (!me || !alive) return;
+                study(me, () => alive).then(safe("typo studied", () => relearn()), (e: any) => caught("typo study", e));
+            }), 20_000));
             loadSaved().then(safe("typo learn", () => {
                 stats.words = relearn();
             }), (e: any) => caught("typo saved", e));
@@ -258,6 +296,7 @@ export default {
             } catch { }
         }
         hooked = "off";
+        alive = false;
     },
 };
 
@@ -270,7 +309,7 @@ export function typoDebug(): string[] {
     return [
         `typo fix: ${hooked}, ${wordStatus}, messages checked ${stats.sent}, words fixed ${stats.fixed}, undone by editing back ${stats.undone}, taught with *word ${stats.taught}`,
         `learned from your edits: ${pairs.size} pairs from ${stats.histories} edited messages (${stats.versions} edits, ${stats.swaps} word swaps, ${stats.candidates} close ones), never fix ${(typoSettings.never ?? []).length}`,
-        `your writing: ${stats.mine} loaded messages of yours, ${(typoSettings.recent ?? []).length} sent kept, ${personal.size} words with context`,
+        `your writing: ${stats.mine} loaded messages of yours, ${stats.history} from your dm history (${studyState.status}, ${studyState.pages} pages), ${(typoSettings.recent ?? []).length} sent kept, ${personal.size} words with context, ${stats.stars} typos from your *corrections`,
         `  pairs: ${[...pairs.values()].slice(0, 60).map(p => `${p.from}>${p.to}${p.n > 1 ? `x${p.n}` : ""}`).join(", ")}`.slice(0, 1500),
         ...log.slice(-8).map(l => `  ${new Date(l.at).toTimeString().slice(0, 5)} ${l.from} > ${l.to} (${l.how})`),
     ];

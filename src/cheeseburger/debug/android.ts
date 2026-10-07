@@ -1,7 +1,7 @@
 import { getNativeModule, NativeFileModule } from "@api/native/modules";
 import { isPluginEnabled, pluginInstances } from "@plugins";
 
-import { readMemory } from "../crash";
+import { lastCrashReport, readMemory } from "../crash";
 
 let lines: string[] = ["not checked yet"];
 let running: Promise<void> | null = null;
@@ -164,6 +164,7 @@ async function collect(): Promise<string[]> {
     const cache = String(consts.CacheDirPath ?? "");
     out.push(`app folders: files ${files ? files.replace(/^\/data\/user\/0\//, "") : "?"}, cache ${cache ? cache.replace(/^\/data\/user\/0\//, "") : "?"}`);
     out.push(await sentryRun());
+    out.push(`discord's last crash report: ${await within(lastCrashReport(), 3000, "no answer")}`);
     out.push(...nativeModules());
     for (const base of [cache, files].filter(Boolean)) {
         const found: string[] = [];

@@ -170,6 +170,38 @@ async function androidSaysCrashed(): Promise<boolean | null> {
     }
 }
 
+function describeReport(r: any): string {
+    if (r == null) return "";
+    if (typeof r === "string") return r.slice(0, 600);
+    try {
+        const keep: any = {};
+        for (const k of Object.keys(r).slice(0, 20)) {
+            const v = r[k];
+            keep[k] = typeof v === "string" ? v.slice(0, 300) : v;
+        }
+        return JSON.stringify(keep).slice(0, 900);
+    } catch {
+        return String(r).slice(0, 300);
+    }
+}
+
+export async function lastCrashReport(): Promise<string> {
+    try {
+        const mods: any = g.modules ?? {};
+        for (const id of Object.keys(mods)) {
+            const m = mods[id];
+            if (m?.__filePath !== "utils/SentryUtils.native.tsx" || !m.isInitialized) continue;
+            const fn = m.publicModule?.exports?.default?.getLastCrashReport;
+            if (typeof fn !== "function") return "no getLastCrashReport";
+            const r = await Promise.race([Promise.resolve(fn.call(m.publicModule.exports.default)), new Promise(res => setTimeout(() => res("no answer"), 2000))]);
+            return describeReport(r) || "nothing";
+        }
+        return "sentry utils not loaded";
+    } catch (e: any) {
+        return `failed: ${String(e?.message ?? e).slice(0, 80)}`;
+    }
+}
+
 function inCall() {
     try {
         return !!SelectedChannelStore?.getVoiceChannelId?.();
@@ -298,7 +330,9 @@ async function restore(checked: boolean) {
     if (!checked && prev && !prev.ended) {
         const android = await androidSaysCrashed();
         if (!current()) return;
-        const crumbs = Array.isArray(prev.crumbs) && prev.crumbs.length ? `before it: ${prev.crumbs.slice(-8).join(" | ")}` : undefined;
+        const report = await lastCrashReport();
+        if (!current()) return;
+        const crumbs = [Array.isArray(prev.crumbs) && prev.crumbs.length ? `before it: ${prev.crumbs.slice(-8).join(" | ")}` : "", report && !/^(nothing|sentry utils not loaded)$/.test(report) ? `discord's crash report: ${report}` : ""].filter(Boolean).join("\n    ") || undefined;
         const stuck = typeof prev.stuck === "number" ? `, screen stuck since ${when(prev.stuck)} (android "not responding")` : "";
         if (prev.state === "active" || prev.call || android) {
             const where = prev.state === "active" ? prev.call ? "open in a call" : "open" : prev.call ? "in a call in the background" : "in the background";
