@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from "fs";
 
 const SOURCE = "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/en/en_50k.txt";
 const NAMES = "https://raw.githubusercontent.com/smashew/NameDatabases/master/NamesDatabases/first%20names/us.txt";
-const VERSION = "#cheeseburger-words v4";
+const VERSION = "#cheeseburger-words v6";
 const TARGETS = 30000;
 const SHORT = "a i am an as at be by do go he hi if in is it me my no of oh ok on or so to up us we".split(" ");
 const SLANG = `
@@ -42,7 +42,8 @@ const chat = SLANG.filter(w => /^[a-z]{4,}$/.test(w) && !seen.has(w));
 targets.splice(5000, 0, ...chat);
 for (const w of chat) seen.add(w);
 const inTargets = new Set(targets);
-const slang = [...new Set([...SLANG.map(w => w.replace(/'/g, "")), ...named])].filter(w => !inTargets.has(w));
+const slang = [...new Set(SLANG.map(w => w.replace(/'/g, "")))].filter(w => !inTargets.has(w));
 const rest = known.filter(w => !slang.includes(w));
-writeFileSync("addons/cheeseburger-words.txt", [VERSION, ...targets, "#known", ...rest, "#slang", ...slang, ""].join("\n"));
-console.log(`words: ${targets.length} fix targets, ${rest.length} rare, ${slang.length} slang`);
+const people = named.filter(w => !slang.includes(w));
+writeFileSync("addons/cheeseburger-words.txt", [VERSION, ...targets, "#known", ...rest, "#names", ...people, "#slang", ...slang, "#chat", ...SLANG.map(w => w.replace(/'/g, "")).filter(w => inTargets.has(w)), ""].join("\n"));
+console.log(`words: ${targets.length} fix targets, ${rest.length} rare, ${people.length} names, ${slang.length} slang`);

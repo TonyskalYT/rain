@@ -6,6 +6,7 @@ export interface TypoSettings {
     never: string[];
     sent: Record<string, number>;
     taught: Record<string, string>;
+    recent: string[];
     log: FixLog[];
 }
 
@@ -16,5 +17,6 @@ export const {
     never: [],
     sent: {},
     taught: {},
+    recent: [],
     log: [],
 });

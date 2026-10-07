@@ -2,8 +2,13 @@ export interface Words {
     known(word: string): boolean;
     rank(word: string): number | undefined;
     rare(word: string): number | undefined;
+    name(word: string): boolean;
+    skip(word: string): boolean;
     personal(word: string): string | undefined;
+    lift?(prev: string, word: string, next: string): number;
 }
+
+export interface Around { prev: string; next: string; }
 
 export interface Change { from: string; to: string; }
 
@@ -37,6 +42,7 @@ const EDGE_BEFORE = /[\w:;=<>^'\\/.]/;
 const EDGE_AFTER = /[\w:;=<>^'\\/]/;
 const LETTERS = "abcdefghijklmnopqrstuvwxyz";
 const CLEAR = 4;
+const KEEP_RARE = 3;
 
 export const nearKeys = (c: string) => NEAR[c] ?? "";
 
@@ -71,15 +77,20 @@ function oneSlip(w: string, out: Map<string, number>, base: number, wide: boolea
     }
 }
 
-function pick(word: string, found: Map<string, number>, words: Words): string | null {
+export const prob = (rank: number) => 1 / (11 * rank);
+
+const liftOf = (words: Words, at: Around, w: string) => words.lift ? words.lift(at.prev, w, at.next) : 1;
+
+function pick(word: string, found: Map<string, number>, words: Words, at: Around, keep: number, keyboardOnly: boolean): string | null {
     let first: [string, number] | null = null;
     let second = 0;
     const cap = word.length >= 6 ? 30000 : 10000;
     for (const [c, weight] of found) {
         if (c.length !== word.length && c.length < 3) continue;
+        if (keyboardOnly && weight < 0.5) continue;
         const r = words.rank(c);
         if (r === undefined || r > cap || weight < 0.5 && (r > 3000 || word.length < 4)) continue;
-        const score = weight / r;
+        const score = weight * prob(r) * liftOf(words, at, c);
         if (!first || score > first[1]) {
             if (first) second = Math.max(second, first[1]);
             first = [c, score];
@@ -87,20 +98,20 @@ function pick(word: string, found: Map<string, number>, words: Words): string | 
             second = Math.max(second, score);
         }
     }
-    if (!first || first[1] < second * CLEAR) return null;
+    if (!first || first[1] < second * CLEAR || first[1] <= keep) return null;
     return first[0];
 }
 
-export function best(word: string, words: Words): string | null {
+export function best(word: string, words: Words, at: Around = { prev: "", next: "" }, keep = 0, keyboardOnly = false): string | null {
     const found = new Map<string, number>();
-    oneSlip(word, found, 1, true);
-    const one = pick(word, found, words);
-    if (one || word.length < 6) return one;
+    oneSlip(word, found, 1, !keyboardOnly);
+    const one = pick(word, found, words, at, keep, keyboardOnly);
+    if (one || word.length < 6 || keyboardOnly) return one;
     const two = new Map<string, number>();
     for (const [c, weight] of found) if (weight >= 0.5) oneSlip(c, two, weight * 0.5, false);
     two.delete(word);
     for (const [c, weight] of found) if ((two.get(c) ?? 0) < weight) two.set(c, weight);
-    return pick(word, two, words);
+    return pick(word, two, words, at, keep, false);
 }
 
 function shape(original: string, fixed: string): string {
@@ -118,7 +129,7 @@ function startsSentence(text: string, at: number): boolean {
     return true;
 }
 
-function fixWord(text: string, start: number, w: string, words: Words): string | null {
+function fixWord(text: string, start: number, w: string, words: Words, at: Around): string | null {
     if (w.length < 2 || w.includes("'") || /(.)\1\1/i.test(w)) return null;
     const before = text[start - 1];
     const after = text[start + w.length];
@@ -131,26 +142,50 @@ function fixWord(text: string, start: number, w: string, words: Words): string |
     if (w === upper && w.length > 1 && w.length < 4) return null;
     const mine = words.personal(lower);
     if (mine) return shape(w, mine);
+    if (words.skip(lower) || words.name(lower) && w !== lower) return null;
     const rare = words.rare(lower);
-    if (rare === undefined && words.known(lower)) return null;
-    const fixed = best(lower, words);
-    if (fixed && rare !== undefined && !(words.rank(fixed)! <= 2000 && rare >= words.rank(fixed)! * 100)) return null;
+    const real = words.rank(lower);
+    let fixed: string | null = null;
+    if (rare !== undefined) {
+        fixed = best(lower, words, at, KEEP_RARE * CLEAR * prob(rare) * liftOf(words, at, lower));
+    } else if (real !== undefined) {
+        return null;
+    } else if (!words.known(lower)) {
+        fixed = best(lower, words, at);
+    }
     return fixed ? shape(w, fixed) : null;
 }
+
+const BREAK = /[.!?\n]/;
 
 export function fixText(text: string, words: Words): { text: string; changes: Change[]; } {
     const changes: Change[] = [];
     if (!text || /^\s*[/!$]/.test(text)) return { text, changes };
     const spans: [number, number][] = [];
     for (const m of text.matchAll(PROTECT)) spans.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
-    const fixed = text.replace(WORD, (w: string, at: number, all: string) => {
-        if (spans.some(([s, e]) => at < e && at + w.length > s)) return w;
-        const next = fixWord(all, at, w, words);
-        if (!next || next === w) return w;
-        changes.push({ from: w, to: next });
-        return next;
-    });
-    return { text: fixed, changes };
+    const toks = [...text.matchAll(WORD)].map(m => ({ w: m[0], at: m.index ?? 0 }));
+    let out = "";
+    let last = 0;
+    let prev = "^";
+    for (let i = 0; i < toks.length; i++) {
+        const t = toks[i];
+        const end = t.at + t.w.length;
+        if (i === 0 || BREAK.test(text.slice(toks[i - 1].at + toks[i - 1].w.length, t.at))) prev = "^";
+        const n = toks[i + 1];
+        const next = !n || BREAK.test(text.slice(end, n.at)) ? "$" : n.w.toLowerCase().replace(/'/g, "");
+        let rep = t.w;
+        if (!spans.some(([a, b]) => t.at < b && end > a)) {
+            const f = fixWord(text, t.at, t.w, words, { prev, next });
+            if (f && f !== t.w) {
+                changes.push({ from: t.w, to: f });
+                rep = f;
+            }
+        }
+        out += text.slice(last, t.at) + rep;
+        last = end;
+        prev = rep.toLowerCase().replace(/'/g, "");
+    }
+    return { text: out + text.slice(last), changes };
 }
 
 export function wordsIn(text: string): string[] {

@@ -1,23 +1,28 @@
 import { before } from "@api/patcher";
 import { waitForHydration } from "@api/storage";
 import { findByProps } from "@metro";
-import { UserStore } from "@metro/common/stores";
+import { MessageStore, SelectedChannelStore, UserStore } from "@metro/common/stores";
 
 import { caught, safe } from "../crash";
+import { hasHistory, split } from "../logger/history";
 import { allSaved, loadSaved } from "../logger/saved";
-import { fixText, Words, wordsIn } from "./fix";
-import { distance, learnPairs, Pair } from "./learn";
+import { fixText, prob, Words, wordsIn } from "./fix";
+import { choosePairs, collectSwaps, distance, Pair } from "./learn";
 import { typoSettings, useTypoSettings } from "./storage";
-import { getDictionary, loadDictionary, wordStatus } from "./words";
+import { Dictionary, getDictionary, loadDictionary, Row, wordStatus } from "./words";
 
 const G = globalThis as any;
 const unpatches: (() => unknown)[] = [];
 const timers: ReturnType<typeof setTimeout>[] = [];
 let pairs: Map<string, Pair> = G.__cheeseburgerTypoPairs ??= new Map();
+let personal: Map<string, Row> = new Map();
 let hooked = "not yet";
-const stats = { sent: 0, fixed: 0, words: 0, undone: 0, taught: 0 };
+const stats = { sent: 0, fixed: 0, undone: 0, taught: 0, histories: 0, versions: 0, swaps: 0, candidates: 0, mine: 0, words: 0 };
 const lastSent = new Map<string, { text: string; at: number; }>();
 const KNOWN_AFTER = 3;
+const K = 20;
+const MINE = 10;
+const BREAK = /[.!?\n]+/;
 
 function myId(): string | undefined {
     try {
@@ -28,6 +33,26 @@ function myId(): string | undefined {
 }
 
 const never = () => new Set(typoSettings.never ?? []);
+const clamp = (v: number) => Math.min(50, Math.max(0.02, v));
+
+function chance(d: Dictionary, w: string): number {
+    if (w === "$") return 0.08;
+    const r = d.targets.get(w) ?? d.rare.get(w);
+    return r ? prob(r) : 1e-6;
+}
+
+const inVocab = (d: Dictionary, w: string) => w === "^" || w === "$" || d.targets.has(w) || d.rare.has(w) || d.slang.has(w);
+
+function side(d: Dictionary, a: string, b: string): number {
+    if (!inVocab(d, a) || !inVocab(d, b)) return 1;
+    const row = d.context.get(a);
+    const mine = personal.get(a);
+    const total = (row?.total ?? 0) + MINE * (mine?.total ?? 0);
+    if (!total) return 1;
+    const count = (row?.next.get(b) ?? 0) + MINE * (mine?.next.get(b) ?? 0);
+    const p = chance(d, b);
+    return clamp((count + K * p) / (total + K) / p);
+}
 
 function words(): Words | null {
     const d = getDictionary();
@@ -35,11 +60,59 @@ function words(): Words | null {
     const blocked = never();
     const sent = typoSettings.sent ?? {};
     return {
-        known: w => d.targets.has(w) || d.slang.has(w) || blocked.has(w) || (sent[w] ?? 0) >= KNOWN_AFTER,
+        known: w => d.targets.has(w) || d.slang.has(w) || d.rare.has(w),
         rank: w => d.targets.get(w),
-        rare: w => blocked.has(w) || d.slang.has(w) || (sent[w] ?? 0) >= KNOWN_AFTER ? undefined : d.rare.get(w),
+        rare: w => d.rare.get(w),
+        name: w => d.names.has(w),
+        skip: w => blocked.has(w) || (sent[w] ?? 0) >= KNOWN_AFTER && !d.targets.has(w),
         personal: w => blocked.has(w) ? undefined : pairs.get(w)?.to,
+        lift: d.context.size || personal.size ? (prev, w, next) => (prev ? side(d, prev, w) : 1) * (next ? side(d, w, next) : 1) : undefined,
     };
+}
+
+function sentences(text: string): string[][] {
+    const out: string[][] = [];
+    for (const part of text.split(BREAK)) {
+        const ws = wordsIn(part).map(w => w.replace(/'/g, ""));
+        if (ws.length) out.push(ws);
+    }
+    return out;
+}
+
+function addText(map: Map<string, Row>, text: string) {
+    for (const ws of sentences(text)) {
+        const seq = ["^", ...ws, "$"];
+        for (let i = 0; i + 1 < seq.length; i++) {
+            let row = map.get(seq[i]);
+            if (!row) map.set(seq[i], row = { total: 0, next: new Map() });
+            row.total++;
+            row.next.set(seq[i + 1], (row.next.get(seq[i + 1]) ?? 0) + 1);
+        }
+    }
+}
+
+function loadedMessages(): any[] {
+    const out: any[] = [];
+    try {
+        const sample = MessageStore.getMessages?.(SelectedChannelStore.getChannelId?.() ?? SelectedChannelStore.getLastSelectedChannelId?.() ?? "0");
+        const all = sample?.constructor?._channelMessages;
+        if (!all) return out;
+        for (const id of Object.keys(all)) {
+            const list = all[id]?._array;
+            if (Array.isArray(list)) out.push(...list);
+        }
+    } catch { }
+    return out;
+}
+
+function versionsOf(content: string, id: string): string[] {
+    const known = G.__cheeseburgerEdits?.get?.(id);
+    if (known && Array.isArray(known.old) && known.old.length) return [...known.old, split(String(known.current ?? content)).current];
+    if (hasHistory(content)) {
+        const parts = split(content);
+        return [...parts.old, parts.current];
+    }
+    return [split(content).current];
 }
 
 export function relearn(): number {
@@ -47,13 +120,36 @@ export function relearn(): number {
     const me = myId();
     if (!d || !me) return pairs.size;
     const blocked = never();
-    const histories = allSaved().filter(e => e.authorId === me && Array.isArray(e.old) && e.old.length).map(e => [...e.old, e.content]);
-    const found = learnPairs(
-        histories,
-        w => !blocked.has(w) && !d.targets.has(w) && !d.slang.has(w),
-        w => d.targets.has(w) || d.slang.has(w),
-    );
-    pairs = new Map(found.map(p => [p.from, p]));
+    const histories = new Map<string, string[]>();
+    const corpus = new Map<string, Row>();
+    for (const e of allSaved()) {
+        if (e.authorId !== me) continue;
+        const list = [...(Array.isArray(e.old) ? e.old : []), e.content].filter(t => typeof t === "string" && t);
+        if (list.length > 1) histories.set(e.id, list);
+        addText(corpus, list[list.length - 1] ?? "");
+    }
+    let mine = 0;
+    for (const m of loadedMessages()) {
+        if (m?.author?.id !== me || typeof m.content !== "string" || !m.content) continue;
+        mine++;
+        const list = versionsOf(m.content, m.id);
+        if (list.length > 1 && !histories.has(m.id)) histories.set(m.id, list);
+        addText(corpus, list[list.length - 1]);
+    }
+    for (const t of typoSettings.recent ?? []) addText(corpus, t);
+    personal = corpus;
+    const found = collectSwaps([...histories.values()]);
+    stats.histories = histories.size;
+    stats.versions = found.versions;
+    stats.swaps = found.swaps;
+    stats.candidates = found.counts.size;
+    stats.mine = mine;
+    const chosen = choosePairs(found, (from, to, n) => {
+        if (blocked.has(from) || d.slang.has(from) || !(d.targets.has(to) || d.slang.has(to))) return false;
+        if (d.targets.has(from)) return n >= 2;
+        return true;
+    });
+    pairs = new Map(chosen.map(p => [p.from, p]));
     for (const [from, to] of Object.entries(typoSettings.taught ?? {})) {
         if (!blocked.has(from)) pairs.set(from, { from, to, n: pairs.get(from)?.n ?? 1, star: true });
     }
@@ -69,6 +165,8 @@ function remember(from: string, to: string, how: string) {
 function countSent(text: string) {
     const d = getDictionary();
     if (!d) return;
+    typoSettings.recent = [...(typoSettings.recent ?? []), text.slice(0, 300)].slice(-400);
+    addText(personal, text);
     const sent = { ...(typoSettings.sent ?? {}) };
     let changed = false;
     for (const w of wordsIn(text)) {
@@ -149,6 +247,7 @@ export default {
             loadSaved().then(safe("typo learn", () => {
                 stats.words = relearn();
             }), (e: any) => caught("typo saved", e));
+            timers.push(setTimeout(safe("typo relearn later", () => relearn()), 60_000));
         }), (e: any) => caught("typo words", e));
     },
     stop() {
@@ -170,7 +269,9 @@ export function typoDebug(): string[] {
     const log = typoSettings.log ?? [];
     return [
         `typo fix: ${hooked}, ${wordStatus}, messages checked ${stats.sent}, words fixed ${stats.fixed}, undone by editing back ${stats.undone}, taught with *word ${stats.taught}`,
-        `learned from your edits: ${pairs.size}${pairs.size ? ` (${[...pairs.values()].slice(0, 12).map(p => `${p.from}>${p.to}`).join(", ")})` : ""}, never fix ${(typoSettings.never ?? []).length}`,
+        `learned from your edits: ${pairs.size} pairs from ${stats.histories} edited messages (${stats.versions} edits, ${stats.swaps} word swaps, ${stats.candidates} close ones), never fix ${(typoSettings.never ?? []).length}`,
+        `your writing: ${stats.mine} loaded messages of yours, ${(typoSettings.recent ?? []).length} sent kept, ${personal.size} words with context`,
+        `  pairs: ${[...pairs.values()].slice(0, 60).map(p => `${p.from}>${p.to}${p.n > 1 ? `x${p.n}` : ""}`).join(", ")}`.slice(0, 1500),
         ...log.slice(-8).map(l => `  ${new Date(l.at).toTimeString().slice(0, 5)} ${l.from} > ${l.to} (${l.how})`),
     ];
 }

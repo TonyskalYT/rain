@@ -43,13 +43,18 @@ function swaps(a: string[], b: string[]): [string, string][] {
     return out;
 }
 
-export function learnPairs(histories: string[][], typo: (w: string) => boolean, real: (w: string) => boolean): Pair[] {
+export interface Swaps { counts: Map<string, Map<string, number>>; versions: number; swaps: number; }
+
+export function collectSwaps(histories: string[][]): Swaps {
     const counts = new Map<string, Map<string, number>>();
-    for (const versions of histories) {
-        for (let k = 0; k + 1 < versions.length; k++) {
-            for (const [from, to] of swaps(wordsIn(versions[k]), wordsIn(versions[k + 1]))) {
-                if (from.includes("'") || to.includes("'") || to.length < 2 || from.length < 2) continue;
-                if (/(.)\1\1/.test(from) || !typo(from) || !real(to)) continue;
+    let versions = 0;
+    let swapsSeen = 0;
+    for (const list of histories) {
+        for (let k = 0; k + 1 < list.length; k++) {
+            versions++;
+            for (const [from, to] of swaps(wordsIn(list[k]), wordsIn(list[k + 1]))) {
+                swapsSeen++;
+                if (from.includes("'") || to.includes("'") || to.length < 2 || from.length < 2 || /(.)\1\1/.test(from)) continue;
                 if (distance(from, to) > 2 || Math.abs(from.length - to.length) > 1) continue;
                 const m = counts.get(from) ?? new Map<string, number>();
                 m.set(to, (m.get(to) ?? 0) + 1);
@@ -57,11 +62,15 @@ export function learnPairs(histories: string[][], typo: (w: string) => boolean, 
             }
         }
     }
+    return { counts, versions, swaps: swapsSeen };
+}
+
+export function choosePairs(found: Swaps, ok: (from: string, to: string, n: number) => boolean): Pair[] {
     const out: Pair[] = [];
-    for (const [from, m] of counts) {
+    for (const [from, m] of found.counts) {
         const ranked = [...m].sort((x, y) => y[1] - x[1]);
         if (ranked.length > 1 && ranked[1][1] * 2 > ranked[0][1]) continue;
-        out.push({ from, to: ranked[0][0], n: ranked[0][1] });
+        if (ok(from, ranked[0][0], ranked[0][1])) out.push({ from, to: ranked[0][0], n: ranked[0][1] });
     }
     return out.sort((x, y) => y.n - x.n);
 }

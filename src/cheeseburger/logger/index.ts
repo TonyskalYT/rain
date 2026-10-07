@@ -511,7 +511,7 @@ function onUpdate(args: any[], e: any) {
     edits.set(m.id, rec);
     cap(edits, 1000);
     stats.edits++;
-    if (channelId && saving(ch, m, prev)) saveEdited(m, prev, rec, channelId, ch);
+    if (channelId && (saving(ch, m, prev) || !!author?.id && author.id === myId())) saveEdited(m, prev, rec, channelId, ch);
     return send(display ? compose(rec.old, content) : content);
 }
 
