@@ -369,12 +369,18 @@ function bigger(ret: any, next: any): any {
     const pct = Number(splitViewSettings.pipWidth);
     if (typeof w !== "number" || typeof h !== "number" || !(w > 0) || !(h > 0) || !Number.isFinite(pct) || pct <= 0) return next;
     const screen = Dimensions.get("window");
-    let scale = (screen.width * Math.min(95, Math.max(20, pct)) / 100) / w;
-    if (h * scale > screen.height * 0.45) scale = screen.height * 0.45 / h;
-    if (Math.abs(w * scale - w) < 0.5) return next;
+    const wide = screen.width * Math.min(95, Math.max(20, pct)) / 100;
+    const area = wide * wide * 9 / 16;
+    const aspect = w / h;
+    let width = Math.sqrt(area * aspect);
+    let height = Math.sqrt(area / aspect);
+    const fit = Math.min(1, screen.height * 0.45 / height, screen.width * 0.95 / width);
+    width *= fit;
+    height *= fit;
+    if (Math.abs(width - w) < 0.5 && Math.abs(height - h) < 0.5) return next;
     const out = next === ret ? { ...ret } : next;
-    out.width = w * scale;
-    out.height = h * scale;
+    out.width = width;
+    out.height = height;
     return out;
 }
 
