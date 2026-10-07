@@ -7,22 +7,16 @@ import { isPluginEnabled, pluginInstances, startPlugin, stopPlugin } from "@plug
 import { AppState } from "react-native";
 
 import { caught, safe } from "../crash";
-import { flushSaved, getSaved, loadSaved, putSaved, savedIn, savedInfo, setSavedLimit } from "./saved";
+import { cleanHistory, Edit, hasHistory, linesOf, MARK, MARKED, NUDGE, NUDGED, same, split, tidy } from "./history";
+import { flushSaved, getSaved, loadSaved, putSaved, savedIn, savedInfo, setHistory, setSavedLimit } from "./saved";
 import { loggerSettings, useLoggerSettings } from "./storage";
-
-interface Edit { old: string[]; current: string; }
 
 const CORE = "messagelogger";
 const SKIP = "CHEESEBURGER_LOGGER_SKIP";
 const REPEAT_MS = 15_000;
-const HISTORY = /^-# (?:~~.*~~|\u200b.*)$/;
-const MARK = "\u2063";
-const MARKED = /^-# \u2063.*$/;
-const NUDGE = "\u2060";
-const NUDGED = /\u2060+$/;
 const RED_BG = 0x26F04747 | 0;
 const RED_GUTTER = 0xFFF04747 | 0;
-const TYPES = new Set(["MESSAGE_DELETE", "MESSAGE_DELETE_BULK", "MESSAGE_UPDATE", "MESSAGE_START_EDIT", "MESSAGE_END_EDIT", "CONNECTION_OPEN", "LOAD_MESSAGES_SUCCESS", "LOAD_MESSAGES_AROUND_SUCCESS", "LOAD_MESSAGES_SUCCESS_CACHED", "LOCAL_MESSAGES_LOADED"]);
+const TYPES = new Set(["MESSAGE_DELETE", "MESSAGE_DELETE_BULK", "MESSAGE_UPDATE", "MESSAGE_START_EDIT", "MESSAGE_END_EDIT", "CONNECTION_OPEN", "CHANNEL_SELECT", "LOAD_MESSAGES_SUCCESS", "LOAD_MESSAGES_AROUND_SUCCESS", "LOAD_MESSAGES_SUCCESS_CACHED", "LOCAL_MESSAGES_LOADED"]);
 const loads = new Map<string, string>();
 const G = globalThis as any;
 const ghosts: Map<string, number> = G.__cheeseburgerGhosts ??= new Map();
@@ -30,7 +24,8 @@ const ghostInfo: Map<string, { channelId: string; at: number; }> = G.__cheesebur
 const deletedRaw: Map<string, { channelId: string; at: number; raw: any; }> = G.__cheeseburgerDeletedRaw ??= new Map();
 const edits: Map<string, Edit> = G.__cheeseburgerEdits ??= new Map();
 const trail: string[] = G.__cheeseburgerLoggerTrail ??= [];
-const stats = { deletes: 0, repeats: 0, bulk: 0, edits: 0, editBox: 0, saved: 0, restored: 0 };
+const stats = { deletes: 0, repeats: 0, bulk: 0, edits: 0, editBox: 0, saved: 0, restored: 0, tidiedMemory: 0, tidiedScreen: 0 };
+const repaired = new Set<string>();
 const probe = { rows: 0, noteInRow: 0, noteInStore: 0, noteMissing: 0, red: 0, renotes: 0, marks: 0, opens: 0, hlCalls: 0, hlMsg: 0, hlNum: false, hlGhost: 0, hl: "not tried", hlShape: "", rowShape: "", notePath: "", rowTypes: new Set<string>() };
 const tags = new Map<string, number>();
 const lastTry = new Map<string, number>();
@@ -130,23 +125,9 @@ const depth = () => {
     return Number.isFinite(n) ? Math.min(10, Math.max(1, n)) : 5;
 };
 
-function subtext(text: string): string[] {
-    return text.split("\n")
-        .map(l => l.replace(/```\w*/g, "").replace(/~~/g, "").replace(/^\s*(?:>>>|>|-#|#{1,3}(?=\s)|[*-](?=\s))\s*/, "").trim())
-        .filter(Boolean)
-        .map(l => `-# \u200b${l}`);
-}
-
 function compose(old: string[], current: string): string {
-    const lines = old.slice(-depth()).flatMap(subtext);
+    const lines = old.slice(-depth()).flatMap(linesOf).map(l => `-# \u200b${l}`);
     return lines.length ? `${lines.join("\n")}\n${current}` : current;
-}
-
-function split(content: string): Edit {
-    const lines = content.split("\n");
-    let i = 0;
-    while (i < lines.length && HISTORY.test(lines[i])) i++;
-    return { old: lines.slice(0, i).map(l => (l.startsWith("-# ~~") ? l.slice(5, -2) : l.slice(4))), current: lines.slice(i).filter(l => !MARKED.test(l)).join("\n").replace(NUDGED, "") };
 }
 
 function channelOf(id: string): any {
@@ -259,9 +240,12 @@ function rawOf(m: any, channelId: string): any {
     };
 }
 
+const realText = (m: any): string => typeof m?.content === "string" ? split(m.content).current : "";
+
 function saveDeleted(m: any, channelId: string, ch: any) {
     const parsed = typeof m.content === "string" ? split(m.content) : { old: [], current: "" };
     const rec = edits.get(m.id);
+    const current = rec ? split(rec.current).current : parsed.current;
     putSaved({
         id: m.id,
         channelId,
@@ -272,10 +256,10 @@ function saveDeleted(m: any, channelId: string, ch: any) {
         kind: "deleted",
         at: Date.now(),
         sent: timeOf(m.timestamp),
-        content: rec?.current ?? parsed.current,
-        old: (rec?.old ?? parsed.old).slice(-10),
+        content: current,
+        old: cleanHistory(rec?.old.length ? rec.old : parsed.old, current),
         files: filesOf(m),
-        raw: rawOf(m, channelId),
+        raw: rawOf({ ...m, content: parsed.current }, channelId),
     });
     stats.saved++;
 }
@@ -442,7 +426,7 @@ function onDelete(args: any[], e: any) {
     stats.deletes++;
     const at = Date.now();
     args[0] = ghostEvent(channelId, id, at, true);
-    remember(id, channelId, at, rawOf({ ...message, content: typeof message.content === "string" ? message.content.split("\n").filter((l: string) => !MARKED.test(l)).join("\n").replace(NUDGED, "") : "" }, channelId));
+    remember(id, channelId, at, rawOf({ ...message, content: realText(message) }, channelId));
     let where = "";
     try {
         where = SelectedChannelStore.getChannelId?.() === channelId ? AppState.currentState === "active" ? " (on screen)" : " (app in background)" : " (other chat)";
@@ -484,7 +468,7 @@ function onBulk(args: any[], e: any) {
     const at = Date.now();
     for (const [id, message] of later) {
         ghosts.set(id, at);
-        remember(id, channelId, at, rawOf(message, channelId));
+        remember(id, channelId, at, rawOf({ ...message, content: realText(message) }, channelId));
     }
     note(`bulk deleted ${later.length}`);
     args[0] = keep.length ? { ...e, ids: keep } : { type: SKIP };
@@ -507,52 +491,112 @@ function onUpdate(args: any[], e: any) {
     if (!editBoxFixed && author?.id && author.id === myId()) return;
     const ch = channelId ? channelOf(channelId) : null;
     const display = loggerSettings.showEdits !== false && shown(ch, m, prev);
+    const content = hasHistory(m.content) ? split(m.content).current : m.content;
+    const send = (text: string) => {
+        if (text === m.content) return;
+        args[0] = { ...e, message: { ...m, content: text } };
+        return args;
+    };
     let rec = edits.get(m.id);
     if (!rec) {
-        if (!prev || typeof prev.content !== "string") return;
+        if (!prev || typeof prev.content !== "string") return send(content);
         const parsed = split(prev.content);
-        if (parsed.current === m.content || !parsed.current.trim() && !parsed.old.length) return;
-        rec = parsed;
-    } else if (rec.current === m.content) {
-        if (!display || !rec.old.length) return;
-        args[0] = { ...e, message: { ...m, content: compose(rec.old, m.content) } };
-        return args;
+        if (!parsed.old.length && (parsed.current === content || !parsed.current.trim())) return send(content);
+        rec = { old: cleanHistory(parsed.old, parsed.current), current: parsed.current };
+        edits.set(m.id, rec);
+        cap(edits, 1000);
     }
-    if (rec.current.trim()) rec.old = [...rec.old, rec.current].slice(-10);
-    rec.current = m.content;
+    if (rec.current === content) return send(display && rec.old.length ? compose(rec.old, content) : content);
+    rec = { old: cleanHistory(rec.current.trim() ? [...rec.old, rec.current] : rec.old, content), current: content };
     edits.set(m.id, rec);
     cap(edits, 1000);
     stats.edits++;
     if (channelId && saving(ch, m, prev)) saveEdited(m, prev, rec, channelId, ch);
-    if (!display) return;
-    args[0] = { ...e, message: { ...m, content: compose(rec.old, m.content) } };
-    return args;
+    return send(display ? compose(rec.old, content) : content);
 }
 
 const cmpId = (a: string, b: string) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0);
 
+function settle(m: any, ch: any, live: boolean): string {
+    const incoming = split(m.content);
+    const real = incoming.current;
+    const known = edits.get(m.id);
+    const s = getSaved(m.id);
+    const base = known?.old.length ? known.old : s?.old?.length ? s.old : incoming.old;
+    const before = live ? split(known?.current ?? s?.content ?? real).current : real;
+    const old = cleanHistory(tidy(before) && tidy(before) !== tidy(real) ? [...base, before] : base, real);
+    if ((live || !known) && (old.length || known)) {
+        edits.set(m.id, { old, current: real });
+        cap(edits, 1000);
+    }
+    if (live && s) setHistory(m.id, real, old);
+    return old.length && loggerSettings.showEdits !== false && allowed(m.author) && shown(ch, m) ? compose(old, real) : real;
+}
+
+function tidyEdits(): number {
+    let n = 0;
+    for (const [id, rec] of edits) {
+        if (!rec || typeof rec.current !== "string" || !Array.isArray(rec.old)) {
+            edits.delete(id);
+            continue;
+        }
+        const parts = split(rec.current);
+        const old = cleanHistory(rec.old.length ? rec.old : parts.old, parts.current);
+        if (parts.current === rec.current && same(old, rec.old)) continue;
+        edits.set(id, { old, current: parts.current });
+        n++;
+    }
+    return n;
+}
+
+function repairChannel(channelId: unknown, why: string) {
+    if (typeof channelId !== "string" || !channelId || repaired.has(channelId)) return;
+    repaired.add(channelId);
+    timers.push(setTimeout(safe("logger repair", () => {
+        if (!running || coreOn()) return;
+        const list: any[] = MessageStore.getMessages?.(channelId)?.toArray?.() ?? [];
+        const ch = channelOf(channelId);
+        let n = 0;
+        for (const cur of list) {
+            if (n >= 100) break;
+            if (typeof cur?.id !== "string" || typeof cur.content !== "string" || !hasHistory(cur.content)) continue;
+            const body = cur.content.split("\n").filter((l: string) => !MARKED.test(l)).join("\n").replace(NUDGED, "");
+            const next = settle(cur, ch, false);
+            if (next === body || !next) continue;
+            const marks = cur.content.split("\n").filter((l: string) => MARKED.test(l));
+            FluxDispatcher.dispatch({
+                type: "MESSAGE_UPDATE",
+                otherPluginBypass: true,
+                cheeseburgerLogger: true,
+                message: { id: cur.id, channel_id: channelId, content: [next, ...marks].join("\n"), pinned: cur.pinned },
+            });
+            n++;
+        }
+        stats.tidiedScreen += n;
+        if (n) note(`cleaned repeated history on ${n} messages (${why})`);
+    }), 600));
+}
+
 function onLoad(args: any[], e: any) {
     const channelId = e.channelId;
     const list: any[] | null = Array.isArray(e.messages) ? e.messages : null;
-    const flags = ["isBefore", "isAfter", "jump", "cached", "hasMoreBefore", "hasMoreAfter"].filter(k => e[k]).join(" ");
+    const flags = ["isBefore", "isAfter", "jump", "cached", "stale", "isForegroundCacheLoad", "hasMoreBefore", "hasMoreAfter"].filter(k => e[k]).join(" ");
     loads.set(e.type, `${list ? list.length : "no list"} msgs${flags ? ` (${flags})` : ""}`);
     if (!channelId || !list?.length) return;
+    const live = e.type !== "LOCAL_MESSAGES_LOADED";
+    if (!live && !e.isForegroundCacheLoad) {
+        const loaded = MessageStore.getMessages?.(channelId);
+        if (loaded?.ready && !loaded.cached) return;
+    }
+    const ch = channelOf(channelId);
     let changed = false;
     const out = list.map(m => {
         if (!m || typeof m.id !== "string" || typeof m.content !== "string") return m;
-        const s = getSaved(m.id);
-        const known = edits.get(m.id);
-        if (!known && !s?.old.length) return m;
-        const rec: Edit = known ?? { old: [...s!.old], current: s!.content };
-        if (rec.current !== m.content) {
-            if (rec.current.trim()) rec.old = [...rec.old, rec.current].slice(-10);
-            rec.current = m.content;
-            if (s) putSaved({ ...s, content: m.content, old: rec.old });
-        }
-        edits.set(m.id, rec);
-        if (loggerSettings.showEdits === false || !rec.old.length || !allowed(m.author)) return m;
+        if (!edits.has(m.id) && !getSaved(m.id)?.old?.length && !hasHistory(m.content)) return m;
+        const content = settle(m, ch, live);
+        if (content === m.content) return m;
         changed = true;
-        return { ...m, content: compose(rec.old, m.content) };
+        return { ...m, content };
     });
     const restored: { id: string; at: number; raw: any; }[] = [];
     if (loggerSettings.restore !== false && loggerSettings.keepDeleted !== false) {
@@ -575,7 +619,8 @@ function onLoad(args: any[], e: any) {
         if (!ghosts.has(s.id)) ghosts.set(s.id, 0);
         remember(s.id, channelId, s.at);
     }
-    const merged = restored.length ? [...out, ...restored.map(s => ({ ...s.raw }))].sort((a, b) => cmpId(String(b?.id ?? ""), String(a?.id ?? ""))) : out;
+    const back = (raw: any) => typeof raw?.id === "string" && typeof raw.content === "string" ? { ...raw, content: settle(raw, ch, false) } : { ...raw };
+    const merged = restored.length ? [...out, ...restored.map(s => back(s.raw))].sort((a, b) => cmpId(String(b?.id ?? ""), String(a?.id ?? ""))) : out;
     args[0] = { ...e, messages: merged };
     if (restored.length) {
         stats.restored += restored.length;
@@ -611,6 +656,9 @@ const onDispatch = safe("logger", (args: any[]) => {
             probe.opens++;
             renoted.clear();
             if (ghosts.size) renoteAll("reconnected");
+            return;
+        case "CHANNEL_SELECT":
+            repairChannel(e.channelId, "opened");
             return;
         default: return onLoad(args, e);
     }
@@ -739,7 +787,16 @@ export default {
         running = true;
         status = "on";
         setSavedLimit(Number(loggerSettings.maxSaved) || 3000);
-        loadSaved().catch((e: any) => caught("logger load", e));
+        try {
+            stats.tidiedMemory += tidyEdits();
+        } catch (e) {
+            caught("logger tidy", e);
+        }
+        loadSaved().then(safe("logger repair start", () => {
+            try {
+                repairChannel(SelectedChannelStore.getChannelId?.(), "after update");
+            } catch { }
+        }), (e: any) => caught("logger load", e));
         unpatches.push(before("dispatch", FluxDispatcher, onDispatch));
         try {
             fixEditBox();
@@ -785,6 +842,7 @@ export function loggerDebug(): string[] {
         `logger: ${status}, old plugin ${coreOn() ? "on (cheeseburger steps aside)" : "off"}, edit box fix ${editBoxFixed ? "on" : "off (own edits not shown)"}`,
         `kept deleted ${stats.deletes}, repeat deletes swallowed ${stats.repeats}, bulk ${stats.bulk}, edits ${stats.edits}, edit box cleaned ${stats.editBox}, remembered ${ghosts.size} deleted / ${edits.size} edited`,
         `saved on phone: ${info.loaded ? `${info.count} messages, ${info.kb}kb` : "loading"}, saved this run ${stats.saved}, put back in chat ${stats.restored}`,
+        `repeated edit history cleaned: ${info.cleaned} saved, ${stats.tidiedMemory} in memory, ${stats.tidiedScreen} on screen`,
         `loads seen: ${[...loads].map(([t, v]) => `${t} ${v}`).join("; ") || "none yet"}`,
         `deleted rows drawn ${probe.rows}: note in row ${probe.noteInRow}, note in store ${probe.noteInStore}, note missing ${probe.noteMissing}, red ${probe.red}, notes put back ${probe.renotes}, marked in text ${probe.marks}, reconnects ${probe.opens}`,
         `automod note store ${automodStore() ? "found" : "not found"}, note found at ${probe.notePath || "?"}`,

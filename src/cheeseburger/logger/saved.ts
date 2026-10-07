@@ -2,6 +2,7 @@ import { NativeFileModule } from "@api/native/modules";
 import { React } from "@metro/common";
 
 import { safe } from "../crash";
+import { cleanHistory, same, split } from "./history";
 
 export interface Saved {
     id: string;
@@ -19,7 +20,7 @@ export interface Saved {
     raw?: any;
 }
 
-interface State { map: Map<string, Saved>; loaded: boolean; dirty: boolean; bytes: number; }
+interface State { map: Map<string, Saved>; loaded: boolean; dirty: boolean; bytes: number; cleaned?: number; }
 
 const FILE = "rain/cheeseburger-messagelog.json";
 const G = globalThis as any;
@@ -29,6 +30,7 @@ let timer: ReturnType<typeof setTimeout> | null = null;
 let writing: Promise<unknown> = Promise.resolve();
 let limit = 3000;
 let version = 0;
+let tidied = false;
 
 const valid = (e: any): e is Saved => !!e && typeof e.id === "string" && typeof e.channelId === "string" && (e.kind === "deleted" || e.kind === "edited") && typeof e.at === "number";
 
@@ -75,20 +77,59 @@ function schedule() {
     }), 4000);
 }
 
+function tidyEntry(e: Saved): boolean {
+    const text = typeof e.content === "string" ? e.content : "";
+    const parts = split(text);
+    const rawText = typeof e.raw?.content === "string" ? e.raw.content : null;
+    const rawParts = rawText == null ? null : split(rawText);
+    const before = Array.isArray(e.old) ? e.old : [];
+    const old = cleanHistory(before.length ? before : parts.old.length ? parts.old : rawParts?.old ?? [], parts.current);
+    let changed = false;
+    if (parts.current !== text) {
+        e.content = parts.current;
+        changed = true;
+    }
+    if (!same(old, before)) {
+        e.old = old;
+        changed = true;
+    }
+    if (rawParts && rawParts.current !== rawText) {
+        e.raw = { ...e.raw, content: rawParts.current };
+        changed = true;
+    }
+    return changed;
+}
+
+function tidyAll() {
+    if (tidied) return;
+    tidied = true;
+    let n = 0;
+    for (const e of state.map.values()) {
+        try {
+            if (tidyEntry(e)) n++;
+        } catch { }
+    }
+    if (!n) return;
+    state.cleaned = (state.cleaned ?? 0) + n;
+    state.dirty = true;
+}
+
 export async function loadSaved() {
-    if (state.loaded) return;
-    try {
-        const path = `${NativeFileModule.getConstants().DocumentsDirPath}/${FILE}`;
-        if (await NativeFileModule.fileExists(path)) {
-            const text = await NativeFileModule.readFile(path, "utf8");
-            state.bytes = text.length;
-            const data = JSON.parse(text);
-            for (const e of Array.isArray(data?.entries) ? data.entries : []) {
-                if (valid(e) && !state.map.has(e.id)) state.map.set(e.id, e);
+    if (!state.loaded) {
+        try {
+            const path = `${NativeFileModule.getConstants().DocumentsDirPath}/${FILE}`;
+            if (await NativeFileModule.fileExists(path)) {
+                const text = await NativeFileModule.readFile(path, "utf8");
+                state.bytes = text.length;
+                const data = JSON.parse(text);
+                for (const e of Array.isArray(data?.entries) ? data.entries : []) {
+                    if (valid(e) && !state.map.has(e.id)) state.map.set(e.id, e);
+                }
             }
-        }
-    } catch { }
-    state.loaded = true;
+        } catch { }
+        state.loaded = true;
+    }
+    tidyAll();
     if (state.dirty) schedule();
     notify();
 }
@@ -123,6 +164,15 @@ export function putSaved(entry: Saved) {
 
 export const getSaved = (id: string) => state.map.get(id);
 
+export function setHistory(id: string, content: string, old: string[]) {
+    const e = state.map.get(id);
+    if (!e || e.content === content && same(e.old ?? [], old)) return;
+    e.content = content;
+    e.old = old;
+    schedule();
+    notify();
+}
+
 export const savedIn = (channelId: string) => [...state.map.values()].filter(e => e.channelId === channelId);
 
 export const allSaved = () => [...state.map.values()].sort((a, b) => b.at - a.at);
@@ -136,7 +186,7 @@ export function clearSaved() {
     notify();
 }
 
-export const savedInfo = () => ({ count: state.map.size, kb: Math.round(state.bytes / 1024), loaded: state.loaded });
+export const savedInfo = () => ({ count: state.map.size, kb: Math.round(state.bytes / 1024), loaded: state.loaded, cleaned: state.cleaned ?? 0 });
 
 export function useSaved(): number {
     const [, force] = React.useReducer((n: number) => n + 1, 0);
