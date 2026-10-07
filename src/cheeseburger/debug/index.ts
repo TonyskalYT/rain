@@ -26,6 +26,7 @@ import { styleDebug } from "../style";
 import { accentColor, baseColor } from "../style/colors";
 import { useStyleSettings } from "../style/storage";
 import { toolbarDebug } from "../toolbar";
+import { typoDebug } from "../typo";
 import { buildRevision } from "../updates";
 import { voiceDebug } from "../voice";
 import { useVoiceSettings } from "../voice/storage";
@@ -217,6 +218,7 @@ export function debugReport(): string {
         ["logger", loggerDebug],
         ["spotify", spotifyDebug],
         ["search", searchDebug],
+        ["typo", typoDebug],
     ];
     const out = [`cheeseburger debug ${stamp(Date.now())}`];
     for (const [name, fn] of sections) out.push("", `== ${name}`, ...attempt(name, fn));

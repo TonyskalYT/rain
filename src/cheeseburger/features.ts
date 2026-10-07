@@ -10,6 +10,7 @@ import split from "./split";
 import spotify from "./spotify";
 import { cheeseburger, FeatureId } from "./storage";
 import style from "./style";
+import typo from "./typo";
 import updates from "./updates";
 import voice from "./voice";
 import volume from "./volume";
@@ -19,7 +20,7 @@ interface Feature {
     stop(): unknown;
 }
 
-export const FEATURES: Record<FeatureId, Feature> = { volume, deafen, split, rotate, style, share, updates, voice, logger: messageLogger, spotify, search };
+export const FEATURES: Record<FeatureId, Feature> = { volume, deafen, split, rotate, style, share, updates, voice, logger: messageLogger, spotify, search, typo };
 
 const running = new Set<FeatureId>();
 const chains = new Map<FeatureId, Promise<unknown>>();

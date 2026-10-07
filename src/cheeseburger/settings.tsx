@@ -21,6 +21,7 @@ import { currentOrder } from "./split/tiles";
 import { useCheeseburger } from "./storage";
 import { baseColor } from "./style/colors";
 import { useStyleSettings } from "./style/storage";
+import { TypoPage } from "./typo/Page";
 import { buildRevision, syncNow, updateNow, useSync, useUpdateReady } from "./updates";
 import { useVolumeBoostSettings } from "./volume/storage";
 import { startVolumeTest } from "./volume/test";
@@ -82,6 +83,7 @@ export default function Settings() {
     const gear = findAssetId("SettingsIcon");
     const openLogger = () => openPage(navigation, "Message logger", LoggerPage);
     const openSearch = () => openPage(navigation, "Search filters", SearchPage);
+    const openTypo = () => openPage(navigation, "Typo fix", TypoPage);
 
     return (
         <ScrollView style={{ flex: 1 }}>
@@ -186,6 +188,17 @@ export default function Settings() {
                             <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                                 {gear !== undefined && <IconButton size="sm" variant="secondary" icon={gear} onPress={openLogger} />}
                                 <TableSwitch value={s.logger !== false} onValueChange={(v: boolean) => setFeature("logger", v)} />
+                            </View>
+                        }
+                    />
+                    <TableRow
+                        label="Typo fix"
+                        subLabel="fixes neighbor key slips when you hit send"
+                        onPress={openTypo}
+                        trailing={
+                            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                                {gear !== undefined && <IconButton size="sm" variant="secondary" icon={gear} onPress={openTypo} />}
+                                <TableSwitch value={s.typo !== false} onValueChange={(v: boolean) => setFeature("typo", v)} />
                             </View>
                         }
                     />
