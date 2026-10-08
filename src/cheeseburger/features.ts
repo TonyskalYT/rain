@@ -1,6 +1,6 @@
 import { logger } from "@lib/utils/logger";
 
-import { caught, guardLevel, setGuard } from "./crash";
+import { caught } from "./crash";
 import deafen from "./deafen";
 import messageLogger from "./logger";
 import rotate from "./rotate";
@@ -61,26 +61,12 @@ const stopFeature = (id: FeatureId) => enqueue(id, () => {
     }
 });
 
-const HEAVY = new Set<FeatureId>(["split", "volume", "voice", "rotate", "deafen", "share", "style", "typo"]);
-
-export function allowed(id: FeatureId, level = guardLevel()): boolean {
-    if (level >= 2) return id === "updates";
-    if (level >= 1) return !HEAVY.has(id);
-    return true;
-}
-
 export async function startAll() {
     pluginRunning = true;
     cheeseburger.share = true;
     for (const id of Object.keys(FEATURES) as FeatureId[]) {
-        if (!allowed(id)) continue;
         if (id === "share" || cheeseburger[id] !== false) await startFeature(id);
     }
-}
-
-export async function leaveSafeMode() {
-    setGuard(0);
-    if (pluginRunning) await startAll();
 }
 
 export async function stopAll() {
@@ -91,6 +77,6 @@ export async function stopAll() {
 export function setFeature(id: FeatureId, on: boolean) {
     if (id === "share") on = true;
     cheeseburger[id] = on;
-    if (!pluginRunning || on && !allowed(id)) return;
+    if (!pluginRunning) return;
     void (on ? startFeature(id) : stopFeature(id));
 }
