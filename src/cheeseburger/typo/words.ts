@@ -1,7 +1,7 @@
 import { NativeFileModule } from "@api/native/modules";
 
 const BASE = "https://github.com/TonyskalYT/rain/releases/latest/download/";
-const WORDS = { url: `${BASE}cheeseburger-words.txt`, file: "rain/cheeseburger-words.txt", version: "#cheeseburger-words v6" };
+const WORDS = { url: `${BASE}cheeseburger-words.txt`, file: "rain/cheeseburger-words.txt", version: "#cheeseburger-words v7" };
 const CONTEXT = { url: `${BASE}cheeseburger-context.txt`, file: "rain/cheeseburger-context.txt", version: "#cheeseburger-context v1" };
 
 export interface Row { total: number; next: Map<string, number>; }

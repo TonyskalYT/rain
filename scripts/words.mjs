@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from "fs";
 
 const SOURCE = "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/en/en_50k.txt";
 const NAMES = "https://raw.githubusercontent.com/smashew/NameDatabases/master/NamesDatabases/first%20names/us.txt";
-const VERSION = "#cheeseburger-words v6";
+const VERSION = "#cheeseburger-words v7";
 const TARGETS = 30000;
 const SHORT = "a i am an as at be by do go he hi if in is it me my no of oh ok on or so to up us we".split(" ");
 const SLANG = `
@@ -22,6 +22,20 @@ emoji emojis emote emotes discord nitro gunna gotchu ofc fs nah ion iont deadass
 const text = process.argv[2] ? readFileSync(process.argv[2], "utf8") : await (await fetch(SOURCE)).text();
 const nameText = process.argv[3] ? readFileSync(process.argv[3], "utf8") : await (await fetch(NAMES)).text();
 const names = new Set(nameText.split(/\r?\n/).map(n => n.trim().toLowerCase()).filter(Boolean));
+const casing = new Map();
+if (process.argv[4]) {
+    for (const line of readFileSync(process.argv[4], "utf8").split("\n")) {
+        const [w, total, caps] = line.split(" ");
+        if (w) casing.set(w, [Number(total), Number(caps)]);
+    }
+}
+const CALENDAR = new Set("monday tuesday wednesday thursday friday saturday sunday january february march april may june july august september october november december christmas easter".split(" "));
+const isName = (w, rank) => {
+    if (!names.has(w) || CALENDAR.has(w)) return false;
+    const c = casing.get(w);
+    if (c && c[0] >= 3) return c[1] / c[0] >= 0.5;
+    return rank > 1000;
+};
 let rank = 0;
 const named = [];
 const seen = new Set();
@@ -34,7 +48,7 @@ for (const line of text.split("\n")) {
     seen.add(w);
     rank++;
     const slangy = SLANG.includes(w);
-    if (names.has(w) && rank > 1000 && !slangy) named.push(w);
+    if (isName(w, rank) && !slangy) named.push(w);
     else if (slangy && w.length < 3 || targets.length >= TARGETS) known.push(w);
     else targets.push(w);
 }

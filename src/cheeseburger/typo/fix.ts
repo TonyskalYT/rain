@@ -41,9 +41,7 @@ const WORD = /[A-Za-z]+(?:'[A-Za-z]+)*/g;
 const EDGE_BEFORE = /[\w:;=<>^'\\/.]/;
 const EDGE_AFTER = /[\w:;=<>^'\\/]/;
 const LETTERS = "abcdefghijklmnopqrstuvwxyz";
-const CLEAR = 4;
-const SECOND = 0.05;
-const KEEP_RARE = 3;
+export const TUNE = { clear: 5, clearShort: 8, keepName: 3, second: 0.02, keepRare: 3, near: 1, far: 0.05, double: 0.8, extraNear: 0.5, extraFar: 0.1, swap: 1.3, missing: 0.3, missingDouble: 0.6 };
 
 export const nearKeys = (c: string) => NEAR[c] ?? "";
 
@@ -58,22 +56,22 @@ function oneSlip(w: string, out: Map<string, number>, base: number, wide: boolea
         const near = nearKeys(c);
         for (const ch of LETTERS) {
             if (ch === c) continue;
-            if (near.includes(ch)) put(w.slice(0, i) + ch + w.slice(i + 1), 1);
-            else if (wide && n >= 4) put(w.slice(0, i) + ch + w.slice(i + 1), 0.1);
+            if (near.includes(ch)) put(w.slice(0, i) + ch + w.slice(i + 1), TUNE.near);
+            else if (wide && n >= 4) put(w.slice(0, i) + ch + w.slice(i + 1), TUNE.far);
         }
         if (n > 2) {
             const prev = w[i - 1];
             const next = w[i + 1];
             const cut = w.slice(0, i) + w.slice(i + 1);
-            if (prev === c || next === c) put(cut, 0.8);
-            else if (prev && nearKeys(prev).includes(c) || next && nearKeys(next).includes(c)) put(cut, 0.5);
-            else if (wide && n >= 5) put(cut, 0.1);
+            if (prev === c || next === c) put(cut, TUNE.double);
+            else if (prev && nearKeys(prev).includes(c) || next && nearKeys(next).includes(c)) put(cut, TUNE.extraNear);
+            else if (wide && n >= 5) put(cut, TUNE.extraFar);
         }
-        if (i + 1 < n && c !== w[i + 1] && n > 2) put(w.slice(0, i) + w[i + 1] + c + w.slice(i + 2), 1.3);
+        if (i + 1 < n && c !== w[i + 1] && n > 2) put(w.slice(0, i) + w[i + 1] + c + w.slice(i + 2), TUNE.swap);
     }
     if (inserts && n >= 3) {
         for (let i = 0; i <= n; i++) {
-            for (const ch of LETTERS) put(w.slice(0, i) + ch + w.slice(i), ch === w[i - 1] || ch === w[i] ? 0.6 : 0.3);
+            for (const ch of LETTERS) put(w.slice(0, i) + ch + w.slice(i), ch === w[i - 1] || ch === w[i] ? TUNE.missingDouble : TUNE.missing);
         }
     }
 }
@@ -89,7 +87,7 @@ export function scored(word: string, found: Map<string, number>, words: Words, a
         if (c.length !== word.length && c.length < 3) continue;
         if (keyboardOnly && weight < 0.5) continue;
         const r = words.rank(c);
-        if (r === undefined || r > cap || weight < 0.5 && (r > 3000 || word.length < 4)) continue;
+        if (r === undefined || r > cap || weight < 0.5 && word.length < 7 && (r > 3000 || word.length < 4 && (weight < 0.3 || r > 1500))) continue;
         out.push([c, weight * prob(r) * liftOf(words, at, c)]);
     }
     return out.sort((x, y) => y[1] - x[1]);
@@ -97,7 +95,7 @@ export function scored(word: string, found: Map<string, number>, words: Words, a
 
 function pick(word: string, found: Map<string, number>, words: Words, at: Around, keep: number, keyboardOnly: boolean): string | null {
     const [first, second] = scored(word, found, words, at, keyboardOnly);
-    if (!first || second && first[1] < second[1] * CLEAR || first[1] <= keep) return null;
+    if (!first || second && first[1] < second[1] * (word.length <= 3 ? TUNE.clearShort : TUNE.clear) || first[1] <= keep) return null;
     return first[0];
 }
 
@@ -107,8 +105,8 @@ export function slips(word: string, wide = true): Map<string, number> {
     if (word.length < 4 || !wide) return found;
     const all = new Map(found);
     for (const [c, weight] of found) {
-        if (weight >= 0.5) oneSlip(c, all, weight * SECOND, false, word.length >= 5);
-        else if (weight >= 0.3 && word.length >= 5) oneSlip(c, all, weight * SECOND, false);
+        if (weight >= 0.5) oneSlip(c, all, weight * TUNE.second, false, word.length >= 5);
+        else if (weight >= 0.3 && word.length >= 5) oneSlip(c, all, weight * TUNE.second, false);
     }
     all.delete(word);
     for (const [c, weight] of found) if ((all.get(c) ?? 0) < weight) all.set(c, weight);
@@ -152,7 +150,7 @@ function fixWord(text: string, start: number, w: string, words: Words, at: Aroun
     const real = words.rank(lower);
     let fixed: string | null = null;
     if (rare !== undefined) {
-        fixed = best(lower, words, at, KEEP_RARE * CLEAR * prob(rare) * liftOf(words, at, lower));
+        fixed = best(lower, words, at, (words.name(lower) ? TUNE.keepName : TUNE.keepRare) * TUNE.clear * prob(rare) * liftOf(words, at, lower));
     } else if (real !== undefined) {
         return null;
     } else if (!words.known(lower)) {
