@@ -148,7 +148,7 @@ async function crashLibs(): Promise<string> {
     return libs.size ? `crash libraries loaded: ${[...libs].join(", ")}` : "no crash reporting libraries loaded";
 }
 
-async function collect(): Promise<string[]> {
+async function collect(full: boolean): Promise<string[]> {
     const out: string[] = [];
     const mem = await within(readMemory(), 2500, null);
     out.push(mem
@@ -178,13 +178,15 @@ async function collect(): Promise<string[]> {
             out.push(`  sentry ${name}: ${text == null ? "can't read" : describeMarker(name, text)}`);
         }
     }
-    out.push(await crashLibs());
-    out.push("discord code that looks crash related:", ...jsHints());
+    if (full) {
+        out.push(await crashLibs());
+        out.push("discord code that looks crash related:", ...jsHints());
+    }
     return out;
 }
 
-export function refreshAndroid(): Promise<void> {
-    running ??= within(collect().then(l => {
+export function refreshAndroid(full = true): Promise<void> {
+    running ??= within(collect(full).then(l => {
         lines = l;
     }, e => {
         lines = [`android check failed: ${String((e as any)?.message ?? e).slice(0, 100)}`];

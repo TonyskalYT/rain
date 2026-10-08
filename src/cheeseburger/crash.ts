@@ -28,7 +28,8 @@ interface Session {
     stuck?: number;
     crumbs?: string[];
 }
-interface Saved { log: Entry[]; session?: Session; }
+interface Guard { level: number; since: number; why: string; closes?: number[]; }
+interface Saved { log: Entry[]; session?: Session; guard?: Guard; }
 interface Memory { rss?: number; peak?: number; threads?: number; free?: number; total?: number; swap?: number; }
 
 const FILE = "rain/cheeseburger-crash.json";
@@ -133,7 +134,7 @@ function write(): Promise<void> {
         waiting = true;
         return writing;
     }
-    const data = JSON.stringify({ log: saved.log, session: session ?? saved.session });
+    const data = JSON.stringify({ log: saved.log, session: session ?? saved.session, guard: saved.guard });
     writing = writing
         .then(() => NativeFileModule.writeFile("documents", FILE, data, "utf8"))
         .then(() => { }, () => { });
@@ -153,7 +154,7 @@ async function load(): Promise<Saved | null> {
         const path = `${NativeFileModule.getConstants().DocumentsDirPath}/${FILE}`;
         if (!(await NativeFileModule.fileExists(path))) return null;
         const data = JSON.parse(await NativeFileModule.readFile(path, "utf8"));
-        return data && Array.isArray(data.log) ? { log: data.log, session: data.session } : null;
+        return data && Array.isArray(data.log) ? { log: data.log, session: data.session, guard: data.guard } : null;
     } catch {
         return null;
     }
@@ -320,11 +321,35 @@ function merge(entries: Entry[]) {
     });
 }
 
+const BOOT = "rain/cheeseburger-boot.json";
+let bootTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function readBoot(): Promise<{ at: number; ok: boolean; } | null> {
+    try {
+        const path = `${NativeFileModule.getConstants().DocumentsDirPath}/${BOOT}`;
+        if (!(await NativeFileModule.fileExists(path))) return null;
+        const data = JSON.parse(await NativeFileModule.readFile(path, "utf8"));
+        return typeof data?.at === "number" ? data : null;
+    } catch {
+        return null;
+    }
+}
+
+const writeBoot = (at: number, ok: boolean) => NativeFileModule.writeFile("documents", BOOT, JSON.stringify({ at, ok }), "utf8").catch(() => { });
+
 async function restore(checked: boolean) {
     const early = saved.log;
+    const boot = checked ? null : await readBoot();
+    if (!checked && session) {
+        const at = session.started;
+        void writeBoot(at, false);
+        if (bootTimer) clearTimeout(bootTimer);
+        bootTimer = setTimeout(() => void writeBoot(at, true), 60_000);
+    }
     const prevSaved = await load();
     if (!current()) return;
-    saved = { log: merge([...(prevSaved?.log ?? []), ...early]), session: prevSaved?.session };
+    let closedNow = 0;
+    saved = { log: merge([...(prevSaved?.log ?? []), ...early]), session: prevSaved?.session, guard: prevSaved?.guard ?? saved.guard };
     trim();
     const prev = prevSaved?.session;
     if (!checked && prev && !prev.ended) {
@@ -337,14 +362,54 @@ async function restore(checked: boolean) {
         if (prev.state === "active" || prev.call || android) {
             const where = prev.state === "active" ? prev.call ? "open in a call" : "open" : prev.call ? "in a call in the background" : "in the background";
             add("closed", `closed while ${where}${stuck}, no error caught (${context(prev, android)})`, crumbs, prev.beat);
+            closedNow++;
         } else if (typeof prev.beat === "number") {
             add("gone", `gone while in the background, reopened ${Math.max(0, Math.round((Date.now() - prev.beat) / 60000))}m later (${context(prev, android)})`, crumbs, prev.beat);
         }
     }
+    if (boot && !boot.ok && boot.at > (prev?.started ?? 0) + 1000) {
+        add("closed", "closed within a minute of starting, before anything was saved", undefined, boot.at);
+        closedNow++;
+    }
+    if (!checked) judge(closedNow);
     ready = true;
     waiting = false;
     notify();
     await write();
+}
+
+const HOUR = 3_600_000;
+
+function judge(closedNow: number) {
+    const now = Date.now();
+    if (!saved.guard) saved.guard = { level: 1, since: now, why: "discord kept closing on oct 7 and 8" };
+    let guard = saved.guard;
+    if (guard.level > 0 && now - guard.since > 24 * HOUR && !(guard.closes ?? []).some(t => t > now - 24 * HOUR)) guard = { level: 0, since: now, why: "a day without trouble" };
+    const closes = [...(guard.closes ?? []), ...Array.from({ length: closedNow }, () => now)].filter(t => t > now - HOUR).slice(-10);
+    guard = { ...guard, closes };
+    const recent = closes.filter(t => t >= guard.since);
+    if (closedNow && recent.length >= 2 && guard.level < 2) {
+        guard = { level: guard.level + 1, since: now, why: `discord closed ${recent.length}x in an hour${guard.level ? " even with call features off" : ""}`, closes: [] };
+    }
+    saved.guard = guard;
+}
+
+export function guardLevel(): number {
+    return saved.guard?.level ?? 0;
+}
+
+export function guardInfo(): Guard | null {
+    return saved.guard && saved.guard.level > 0 ? saved.guard : null;
+}
+
+export function setGuard(level: number) {
+    saved.guard = { level, since: Date.now(), why: level ? "turned on by hand" : "turned off by hand", closes: [] };
+    notify();
+    void write();
+}
+
+export function crashRestored(): Promise<void> {
+    return Promise.race([restoring, new Promise<void>(r => setTimeout(r, 3000))]);
 }
 
 function begin(checked: boolean) {
@@ -510,11 +575,13 @@ const timeFlux = safeInstead("crash flux", (args: any[], orig: Function) => {
 function startWatchdog() {
     lastTick = Date.now();
     activeSince = AppState.currentState === "active" ? Date.now() : 0;
-    tick = setInterval(onTick, 1000);
-    try {
-        unflux = instead("dispatch", FluxDispatcher, timeFlux);
-    } catch {
-        unflux = null;
+    if (g.__cheeseburgerDeepWatch) {
+        tick = setInterval(onTick, 1000);
+        try {
+            unflux = instead("dispatch", FluxDispatcher, timeFlux);
+        } catch {
+            unflux = null;
+        }
     }
     sampleMemory();
 }
@@ -634,6 +701,7 @@ export function crashDebug(): string[] {
     const heap = heapMb();
     return [
         `crash log, running since ${session ? when(session.started) : "?"}, cheeseburger ${hotStatus.source} ${hotStatus.revision.slice(0, 7)}, heap ${heap ?? "?"}mb (peak ${Math.max(session?.peak ?? 0, heap ?? 0) || "?"}mb)`,
+        `safe mode: ${saved.guard?.level ? `level ${saved.guard.level} since ${when(saved.guard.since)} (${saved.guard.why})` : `off${saved.guard ? ` (${saved.guard.why})` : ""}`}`,
         ...(saved.log.length
             ? [...saved.log].reverse().flatMap(e => [`  ${label(e)}`, ...(e.stack ? [`    ${e.stack}`] : [])])
             : ["  nothing yet"]),

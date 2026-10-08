@@ -338,7 +338,7 @@ export function sendDebug(reason = "sent"): Promise<string> {
         const name = `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}-${two(d.getHours())}${two(d.getMinutes())}${two(d.getSeconds())}`;
         let status: string;
         try {
-            await refreshAndroid();
+            await refreshAndroid(reason === "sent");
             const text = debugReport();
             await within(put(repo, token, `debug/${name}-${reason}.txt`, text, `${reason} ${name}`), 25000);
             await within(put(repo, token, "latest.txt", text, `latest ${name}`), 25000);

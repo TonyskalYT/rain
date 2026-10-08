@@ -6,12 +6,12 @@ import { clipboard, NavigationNative, React } from "@metro/common";
 import { Button, IconButton, Stack, TableRow, TableRowGroup, TableSwitch, TableSwitchRow, Text, TextInput } from "@metro/common/components";
 import { ScrollView, View } from "react-native";
 
-import { useCrashSummary } from "./crash";
+import { guardInfo, useCrashSummary } from "./crash";
 import { useDeafenButtonSettings } from "./deafen/storage";
 import { debugReport, sendDebug } from "./debug";
 import { DebugUploadSheet, SHEET } from "./debug/Sheet";
 import { useDebugSettings } from "./debug/storage";
-import { setFeature } from "./features";
+import { leaveSafeMode, setFeature } from "./features";
 import { LoggerPage, openPage } from "./logger/Page";
 import { openAdvanced } from "./search/Advanced";
 import { SearchPage } from "./search/Page";
@@ -66,6 +66,7 @@ export default function Settings() {
     const s = useCheeseburger();
     const ready = useUpdateReady();
     const crash = useCrashSummary();
+    const safeMode = guardInfo();
     const sync = useSync();
     const volume = useVolumeBoostSettings();
     const deafen = useDeafenButtonSettings();
@@ -103,6 +104,16 @@ export default function Settings() {
                         </Text>
                     )}
                 </View>
+
+                {!!safeMode && (
+                    <TableRowGroup title="Safe mode">
+                        <TableRow
+                            label={safeMode.level >= 2 ? "everything's off but updates" : "call and button features are off"}
+                            subLabel={`${safeMode.why}, so cheeseburger is running light`}
+                        />
+                        <TableRow label="Turn everything back on" arrow onPress={() => void leaveSafeMode()} />
+                    </TableRowGroup>
+                )}
 
                 <TableRowGroup title="Audio">
                     <TableSwitchRow
