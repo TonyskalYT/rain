@@ -1,5 +1,5 @@
 import { hotStatus } from "@api/hot/status";
-import { NativeClientInfoModule } from "@api/native/modules";
+import { NativeClientInfoModule, NativeFileModule } from "@api/native/modules";
 import { waitForHydration } from "@api/storage";
 import { findByStoreName } from "@metro";
 import { SelectedChannelStore, UserStore } from "@metro/common/stores";
@@ -8,6 +8,7 @@ import { AppState, Dimensions, PixelRatio, Platform, StatusBar } from "react-nat
 
 import { caught, crashDebug, lastCrashAt, safe, watchdogDebug } from "../crash";
 import { useDeafenButtonSettings } from "../deafen/storage";
+import { featureTimes } from "../features";
 import { loggerDebug } from "../logger";
 import { lookDebug } from "../look";
 import { rotateDebug } from "../rotate";
@@ -157,6 +158,7 @@ function device(): string[] {
         `phone ${c.Brand ?? ""} ${c.Model ?? ""}, android ${c.Release ?? "?"} (sdk ${c.Version ?? Platform.Version}), hermes ${!!(globalThis as any).HermesInternal}`,
         `window ${Math.round(win.width)}x${Math.round(win.height)}, screen ${Math.round(scr.width)}x${Math.round(scr.height)}, density ${PixelRatio.get()}, font ${PixelRatio.getFontScale()}, status bar ${StatusBar?.currentHeight ?? "?"}`,
         `app ${AppState.currentState}, this copy loaded ${Math.round((Date.now() - started) / 60000)}m ago`,
+        `feature start times: ${[...featureTimes].map(([k, v]) => `${k} ${v}ms`).join(", ") || "none yet"}`,
     ];
 }
 
@@ -343,7 +345,8 @@ export function sendDebug(reason = "sent"): Promise<string> {
             debugSettings.lastSent = Date.now();
             status = `${reason} ${d.getHours() % 12 || 12}:${two(d.getMinutes())} ${d.getHours() < 12 ? "AM" : "PM"}`;
         } catch (e) {
-            status = `failed: ${String((e as any)?.message ?? e).slice(0, 60)}`;
+            status = `failed: ${String((e as any)?.message ?? e).slice(0, 60)}, will retry`;
+            savePending(name, reason);
         }
         debugSettings.status = status;
         return status;
@@ -354,6 +357,40 @@ export function sendDebug(reason = "sent"): Promise<string> {
 }
 
 let crashTimer: ReturnType<typeof setTimeout> | null = null;
+let retryTimer: ReturnType<typeof setInterval> | null = null;
+let retries = 0;
+const PENDING = "rain/cheeseburger-debug-pending.json";
+
+function savePending(name: string, reason: string) {
+    let text = "";
+    try {
+        text = debugReport();
+    } catch {
+        return;
+    }
+    void NativeFileModule.writeFile("documents", PENDING, JSON.stringify({ name, reason, text }), "utf8").catch(() => { });
+}
+
+async function retryPending() {
+    if (sending || retries >= 10) return;
+    const path = `${NativeFileModule.getConstants().DocumentsDirPath}/${PENDING}`;
+    let data: any = null;
+    try {
+        if (!(await NativeFileModule.fileExists(path))) return;
+        data = JSON.parse(await NativeFileModule.readFile(path, "utf8"));
+    } catch {
+        return;
+    }
+    if (!data?.text || !data?.name) return;
+    restoreLink();
+    if (!debugSettings.token || !REPO.test(debugSettings.repo) || !debugSettings.verified) return;
+    retries++;
+    try {
+        await within(put(debugSettings.repo, debugSettings.token, `debug/${data.name}-${data.reason ?? "sent"}-late.txt`, data.text, `late ${data.name}`), 25000);
+        await NativeFileModule.writeFile("documents", PENDING, "{}", "utf8");
+        debugSettings.status = `sent late ${data.name.slice(11, 15)}`;
+    } catch { }
+}
 
 function restoreLink() {
     if (debugSettings.verified && debugSettings.token && debugSettings.repo) {
@@ -408,6 +445,10 @@ export function startDebug() {
         labTimer = setTimeout(sendLab, 4000);
     });
     void Promise.all([waitForHydration(useDebugSettings), waitForHydration(useDebugLink)]).then(safe("debug restore", restoreLink), () => { });
+    if (retryTimer) clearInterval(retryTimer);
+    retries = 0;
+    retryTimer = setInterval(safe("debug retry", () => void retryPending()), 120_000);
+    setTimeout(safe("debug retry first", () => void retryPending()), 30_000);
     if (crashTimer) clearTimeout(crashTimer);
     crashTimer = setTimeout(() => {
         crashTimer = null;
@@ -423,6 +464,8 @@ export function startDebug() {
 }
 
 export function stopDebug() {
+    if (retryTimer) clearInterval(retryTimer);
+    retryTimer = null;
     if (crashTimer) clearTimeout(crashTimer);
     crashTimer = null;
     labOff?.();

@@ -32,10 +32,14 @@ function enqueue(id: FeatureId, fn: () => unknown): Promise<unknown> {
     return next;
 }
 
+export const featureTimes = new Map<string, number>();
+
 const startFeature = (id: FeatureId) => enqueue(id, async () => {
     if (running.has(id)) return;
     try {
+        const t = Date.now();
         await FEATURES[id].start();
+        featureTimes.set(id, Date.now() - t);
         running.add(id);
     } catch (e) {
         logger.error(`[Cheeseburger] ${id}`, e);

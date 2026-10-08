@@ -8,7 +8,7 @@ import { AppState } from "react-native";
 
 import { caught, safe } from "../crash";
 import { cleanHistory, Edit, hasHistory, linesOf, MARK, MARKED, NUDGE, NUDGED, same, split, tidy } from "./history";
-import { flushSaved, getSaved, loadSaved, putSaved, savedIn, savedInfo, setHistory, setSavedLimit } from "./saved";
+import { flushSaved, getSaved, loadSaved, putSaved, removeSaved, savedIn, savedInfo, setHistory, setSavedLimit } from "./saved";
 import { loggerSettings, useLoggerSettings } from "./storage";
 
 const CORE = "messagelogger";
@@ -16,7 +16,7 @@ const SKIP = "CHEESEBURGER_LOGGER_SKIP";
 const REPEAT_MS = 15_000;
 const RED_BG = 0x26F04747 | 0;
 const RED_GUTTER = 0xFFF04747 | 0;
-const TYPES = new Set(["MESSAGE_DELETE", "MESSAGE_DELETE_BULK", "MESSAGE_UPDATE", "MESSAGE_START_EDIT", "MESSAGE_END_EDIT", "CONNECTION_OPEN", "CHANNEL_SELECT", "LOAD_MESSAGES_SUCCESS", "LOAD_MESSAGES_AROUND_SUCCESS", "LOAD_MESSAGES_SUCCESS_CACHED", "LOCAL_MESSAGES_LOADED"]);
+const TYPES = new Set(["MESSAGE_DELETE", "MESSAGE_DELETE_BULK", "MESSAGE_UPDATE", "MESSAGE_START_EDIT", "MESSAGE_END_EDIT", "CONNECTION_OPEN", "CHANNEL_SELECT", "MESSAGE_SEND_FAILED", "LOAD_MESSAGES_SUCCESS", "LOAD_MESSAGES_AROUND_SUCCESS", "LOAD_MESSAGES_SUCCESS_CACHED", "LOCAL_MESSAGES_LOADED"]);
 const loads = new Map<string, string>();
 const G = globalThis as any;
 const ghosts: Map<string, number> = G.__cheeseburgerGhosts ??= new Map();
@@ -24,7 +24,7 @@ const ghostInfo: Map<string, { channelId: string; at: number; }> = G.__cheesebur
 const deletedRaw: Map<string, { channelId: string; at: number; raw: any; }> = G.__cheeseburgerDeletedRaw ??= new Map();
 const edits: Map<string, Edit> = G.__cheeseburgerEdits ??= new Map();
 const trail: string[] = G.__cheeseburgerLoggerTrail ??= [];
-const stats = { deletes: 0, repeats: 0, bulk: 0, edits: 0, editBox: 0, saved: 0, restored: 0, tidiedMemory: 0, tidiedScreen: 0 };
+const stats = { deletes: 0, repeats: 0, bulk: 0, edits: 0, editBox: 0, saved: 0, restored: 0, tidiedMemory: 0, tidiedScreen: 0, unsentSkipped: 0, dupesDropped: 0 };
 const repaired = new Set<string>();
 const probe = { rows: 0, noteInRow: 0, noteInStore: 0, noteMissing: 0, red: 0, renotes: 0, marks: 0, opens: 0, hlCalls: 0, hlMsg: 0, hlNum: false, hlGhost: 0, hl: "not tried", hlShape: "", rowShape: "", notePath: "", rowTypes: new Set<string>() };
 const tags = new Map<string, number>();
@@ -405,6 +405,58 @@ function mark(id: string) {
     }), 400));
 }
 
+const unsent = (m: any) => typeof m?.state === "string" && m.state !== "SENT";
+const bodyOf = (t: unknown) => typeof t === "string" ? split(t).current.trim() : "";
+
+function forget(id: string) {
+    ghosts.delete(id);
+    ghostInfo.delete(id);
+    deletedRaw.delete(id);
+    removeSaved(id);
+}
+
+function unsentBodies(channelId: string, extra: any[] = []): Set<string> {
+    const me = myId();
+    const out = new Set<string>();
+    let stored: any[] = [];
+    try {
+        stored = MessageStore.getMessages?.(channelId)?.toArray?.() ?? [];
+    } catch { }
+    for (const m of [...stored, ...extra]) {
+        if (!unsent(m) || (m?.author?.id ?? m?.author_id) !== me) continue;
+        const b = bodyOf(m.content);
+        if (b) out.add(b);
+    }
+    return out;
+}
+
+function dropDupes(channelId: unknown, why: string) {
+    if (typeof channelId !== "string" || !channelId) return;
+    timers.push(setTimeout(safe("logger dupes", () => {
+        if (!running || coreOn()) return;
+        const bodies = unsentBodies(channelId);
+        if (!bodies.size) return;
+        const me = myId();
+        let n = 0;
+        for (const [id, info] of [...ghostInfo]) {
+            if (info.channelId !== channelId) continue;
+            const m = MessageStore.getMessage?.(channelId, id);
+            const raw = m ?? deletedRaw.get(id)?.raw ?? getSaved(id)?.raw;
+            if (!raw || (raw.author?.id ?? getSaved(id)?.authorId) !== me || unsent(raw) || !bodies.has(bodyOf(raw.content))) continue;
+            forget(id);
+            if (m) FluxDispatcher.dispatch({ type: "MESSAGE_DELETE", id, channelId, cheeseburgerLogger: true });
+            n++;
+        }
+        for (const e of savedIn(channelId)) {
+            if (e.kind !== "deleted" || e.authorId !== me || !bodies.has(bodyOf(e.content))) continue;
+            forget(e.id);
+            n++;
+        }
+        stats.dupesDropped += n;
+        if (n) note(`dropped ${n} copies of unsent messages (${why})`);
+    }), 800));
+}
+
 function onDelete(args: any[], e: any) {
     const { id, channelId } = e;
     if (typeof id !== "string" || !channelId) return;
@@ -420,6 +472,10 @@ function onDelete(args: any[], e: any) {
     }
     const message = MessageStore.getMessage?.(channelId, id);
     if (!message || !allowed(message.author)) return;
+    if (unsent(message)) {
+        stats.unsentSkipped++;
+        return;
+    }
     const ch = channelOf(channelId);
     if (saving(ch, message)) saveDeleted(message, channelId, ch);
     if (loggerSettings.keepDeleted === false || !shown(ch, message)) return;
@@ -455,7 +511,7 @@ function onBulk(args: any[], e: any) {
             continue;
         }
         const message = MessageStore.getMessage?.(channelId, id);
-        if (!message || !allowed(message.author)) {
+        if (!message || !allowed(message.author) || unsent(message)) {
             keep.push(id);
             continue;
         }
@@ -607,13 +663,21 @@ function onLoad(args: any[], e: any) {
         const pool = new Map<string, { id: string; at: number; raw: any; }>();
         for (const s of savedIn(channelId)) if (s.kind === "deleted" && s.raw) pool.set(s.id, { id: s.id, at: s.at, raw: s.raw });
         for (const [id, d] of deletedRaw) if (d.channelId === channelId && !pool.has(id)) pool.set(id, { id, at: d.at, raw: d.raw });
+        const failed = unsentBodies(channelId, list);
+        const me = myId();
         for (const s of pool.values()) {
             if (present.has(s.id)) continue;
+            if (failed.size && (s.raw?.author?.id ?? getSaved(s.id)?.authorId) === me && failed.has(bodyOf(s.raw?.content))) {
+                forget(s.id);
+                stats.dupesDropped++;
+                continue;
+            }
             if (cmpId(s.id, oldest) < 0 && e.hasMoreBefore !== false) continue;
             if (cmpId(s.id, newest) > 0 && (e.isBefore || e.hasMoreAfter)) continue;
             restored.push(s);
         }
     }
+    dropDupes(channelId, "loaded");
     if (!changed && !restored.length) return;
     for (const s of restored) {
         if (!ghosts.has(s.id)) ghosts.set(s.id, 0);
@@ -659,6 +723,10 @@ const onDispatch = safe("logger", (args: any[]) => {
             return;
         case "CHANNEL_SELECT":
             repairChannel(e.channelId, "opened");
+            dropDupes(e.channelId, "opened");
+            return;
+        case "MESSAGE_SEND_FAILED":
+            dropDupes(e.channelId, "send failed");
             return;
         default: return onLoad(args, e);
     }
@@ -795,6 +863,7 @@ export default {
         loadSaved().then(safe("logger repair start", () => {
             try {
                 repairChannel(SelectedChannelStore.getChannelId?.(), "after update");
+                dropDupes(SelectedChannelStore.getChannelId?.(), "after update");
             } catch { }
         }), (e: any) => caught("logger load", e));
         unpatches.push(before("dispatch", FluxDispatcher, onDispatch));
@@ -840,7 +909,7 @@ export function loggerDebug(): string[] {
     const info = savedInfo();
     return [
         `logger: ${status}, old plugin ${coreOn() ? "on (cheeseburger steps aside)" : "off"}, edit box fix ${editBoxFixed ? "on" : "off (own edits not shown)"}`,
-        `kept deleted ${stats.deletes}, repeat deletes swallowed ${stats.repeats}, bulk ${stats.bulk}, edits ${stats.edits}, edit box cleaned ${stats.editBox}, remembered ${ghosts.size} deleted / ${edits.size} edited`,
+        `kept deleted ${stats.deletes}, unsent deletes ignored ${stats.unsentSkipped}, copies of unsent dropped ${stats.dupesDropped}, repeat deletes swallowed ${stats.repeats}, bulk ${stats.bulk}, edits ${stats.edits}, edit box cleaned ${stats.editBox}, remembered ${ghosts.size} deleted / ${edits.size} edited`,
         `saved on phone: ${info.loaded ? `${info.count} messages, ${info.kb}kb` : "loading"}, saved this run ${stats.saved}, put back in chat ${stats.restored}`,
         `repeated edit history cleaned: ${info.cleaned} saved, ${stats.tidiedMemory} in memory, ${stats.tidiedScreen} on screen`,
         `loads seen: ${[...loads].map(([t, v]) => `${t} ${v}`).join("; ") || "none yet"}`,

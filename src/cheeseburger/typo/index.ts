@@ -275,7 +275,7 @@ export default {
         if (typeof actions.editMessage === "function") unpatches.push(before("editMessage", actions, onEdit));
         hooked = "on";
         alive = true;
-        loadDictionary().then(safe("typo words", () => {
+        timers.push(setTimeout(safe("typo load", () => loadDictionary().then(safe("typo words", () => {
             loadMine().then(safe("typo mine", () => relearn()), () => { });
             timers.push(setTimeout(safe("typo study", () => {
                 const me = myId();
@@ -286,7 +286,7 @@ export default {
                 stats.words = relearn();
             }), (e: any) => caught("typo saved", e));
             timers.push(setTimeout(safe("typo relearn later", () => relearn()), 60_000));
-        }), (e: any) => caught("typo words", e));
+        }), (e: any) => caught("typo words", e))), G.__cheeseburgerWords2 ? 0 : 8000));
     },
     stop() {
         for (const t of timers.splice(0)) clearTimeout(t);

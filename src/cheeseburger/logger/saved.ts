@@ -164,6 +164,12 @@ export function putSaved(entry: Saved) {
 
 export const getSaved = (id: string) => state.map.get(id);
 
+export function removeSaved(id: string) {
+    if (!state.map.delete(id)) return;
+    schedule();
+    notify();
+}
+
 export function setHistory(id: string, content: string, old: string[]) {
     const e = state.map.get(id);
     if (!e || e.content === content && same(e.old ?? [], old)) return;

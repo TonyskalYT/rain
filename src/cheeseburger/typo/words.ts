@@ -28,11 +28,14 @@ async function fetchCached(src: { url: string; file: string; version: string; })
     return text;
 }
 
-function parseWords(text: string, dict: Dictionary) {
+const breath = () => new Promise(r => setTimeout(r, 0));
+
+async function parseWords(text: string, dict: Dictionary) {
     let part = 0;
     let rank = 0;
     const lines = text.split("\n");
     for (let i = 1; i < lines.length; i++) {
+        if (i % 4000 === 0) await breath();
         const w = lines[i].trim();
         if (!w) continue;
         if (w === "#known") part = 1;
@@ -52,9 +55,10 @@ function parseWords(text: string, dict: Dictionary) {
     }
 }
 
-function parseContext(text: string, dict: Dictionary) {
+async function parseContext(text: string, dict: Dictionary) {
     const lines = text.split("\n");
     for (let i = 1; i < lines.length; i++) {
+        if (i % 400 === 0) await breath();
         const parts = lines[i].split(" ");
         if (parts.length < 3) continue;
         const next = new Map<string, number>();
@@ -68,10 +72,10 @@ function parseContext(text: string, dict: Dictionary) {
 
 async function load(): Promise<Dictionary | null> {
     const dict: Dictionary = { targets: new Map(), rare: new Map(), names: new Set(), slang: new Set(), chat: new Set(), context: new Map() };
-    parseWords(await fetchCached(WORDS), dict);
+    await parseWords(await fetchCached(WORDS), dict);
     if (dict.targets.size < 1000) throw new Error("word list looks wrong");
     try {
-        parseContext(await fetchCached(CONTEXT), dict);
+        await parseContext(await fetchCached(CONTEXT), dict);
     } catch { }
     wordStatus = `${dict.targets.size + dict.rare.size + dict.slang.size} words, ${dict.context.size ? "context on" : "no context"}`;
     return dict;
