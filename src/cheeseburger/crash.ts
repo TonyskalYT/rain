@@ -33,6 +33,7 @@ interface Memory { rss?: number; peak?: number; threads?: number; free?: number;
 
 const FILE = "rain/cheeseburger-crash.json";
 const MAX = 14;
+const MAX_GONE = 20;
 const g = globalThis as any;
 
 let saved: Saved = { log: [] };
@@ -101,8 +102,9 @@ function notify() {
 
 function trim() {
     saved.log.sort((a, b) => a.at - b.at);
-    for (const kind of ["gone", "error", "caught", "closed", "crash"] as Kind[]) {
-        while (saved.log.length > MAX) {
+    while (saved.log.filter(e => e.kind === "gone").length > MAX_GONE) saved.log.splice(saved.log.findIndex(e => e.kind === "gone"), 1);
+    for (const kind of ["error", "caught", "closed", "crash"] as Kind[]) {
+        while (saved.log.filter(e => e.kind !== "gone").length > MAX) {
             const i = saved.log.findIndex(e => e.kind === kind);
             if (i === -1) break;
             saved.log.splice(i, 1);
